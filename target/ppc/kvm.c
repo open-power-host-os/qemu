@@ -22,6 +22,7 @@
 #include <linux/kvm.h>
 
 #include "qemu-common.h"
+#include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "cpu.h"
 #include "cpu-models.h"
@@ -75,6 +76,7 @@ static int cap_booke_sregs;
 static int cap_ppc_smt;
 static int cap_ppc_rma;
 static int cap_spapr_tce;
+static int cap_spapr_tce_64;
 static int cap_spapr_multitce;
 static int cap_spapr_vfio;
 static int cap_hior;
@@ -87,6 +89,8 @@ static int cap_fixup_hcalls;
 static int cap_htm;             /* Hardware transactional memory support */
 static int cap_mmu_radix;
 static int cap_mmu_hash_v3;
+static int cap_resize_hpt;
+static int cap_ppc_pvr_compat;
 
 static uint32_t debug_inst_opcode;
 
@@ -129,6 +133,7 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
     cap_ppc_smt = kvm_check_extension(s, KVM_CAP_PPC_SMT);
     cap_ppc_rma = kvm_check_extension(s, KVM_CAP_PPC_RMA);
     cap_spapr_tce = kvm_check_extension(s, KVM_CAP_SPAPR_TCE);
+    cap_spapr_tce_64 = kvm_check_extension(s, KVM_CAP_SPAPR_TCE_64);
     cap_spapr_multitce = kvm_check_extension(s, KVM_CAP_SPAPR_MULTITCE);
     cap_spapr_vfio = false;
     cap_one_reg = kvm_check_extension(s, KVM_CAP_ONE_REG);
@@ -142,6 +147,14 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
     cap_htm = kvm_vm_check_extension(s, KVM_CAP_PPC_HTM);
     cap_mmu_radix = kvm_vm_check_extension(s, KVM_CAP_PPC_MMU_RADIX);
     cap_mmu_hash_v3 = kvm_vm_check_extension(s, KVM_CAP_PPC_MMU_HASH_V3);
+    cap_resize_hpt = kvm_vm_check_extension(s, KVM_CAP_SPAPR_RESIZE_HPT);
+    /*
+     * Note: setting it to false because there is not such capability
+     * in KVM at this moment.
+     *
+     * TODO: call kvm_vm_check_extension() with the right capability
+     * after the kernel starts implementing it.*/
+    cap_ppc_pvr_compat = false;
 
     if (!cap_interrupt_level) {
         fprintf(stderr, "KVM: Couldn't find level irq capability. Expect the "
@@ -476,7 +489,7 @@ static void kvm_fixup_page_sizes(PowerPCCPU *cpu)
     }
 }
 
-bool kvmppc_is_mem_backend_page_size_ok(char *obj_path)
+bool kvmppc_is_mem_backend_page_size_ok(const char *obj_path)
 {
     Object *mem_obj = object_resolve_path(obj_path, NULL);
     char *mempath = object_property_get_str(mem_obj, "mem-path", NULL);
@@ -484,6 +497,7 @@ bool kvmppc_is_mem_backend_page_size_ok(char *obj_path)
 
     if (mempath) {
         pagesize = qemu_mempath_getpagesize(mempath);
+        g_free(mempath);
     } else {
         pagesize = getpagesize();
     }
@@ -497,7 +511,7 @@ static inline void kvm_fixup_page_sizes(PowerPCCPU *cpu)
 {
 }
 
-bool kvmppc_is_mem_backend_page_size_ok(char *obj_path)
+bool kvmppc_is_mem_backend_page_size_ok(const char *obj_path)
 {
     return true;
 }
@@ -2196,13 +2210,24 @@ bool kvmppc_spapr_use_multitce(void)
     return cap_spapr_multitce;
 }
 
-void *kvmppc_create_spapr_tce(uint32_t liobn, uint32_t window_size, int *pfd,
-                              bool need_vfio)
+int kvmppc_spapr_enable_inkernel_multitce(void)
 {
-    struct kvm_create_spapr_tce args = {
-        .liobn = liobn,
-        .window_size = window_size,
-    };
+    int ret;
+
+    ret = kvm_vm_enable_cap(kvm_state, KVM_CAP_PPC_ENABLE_HCALL, 0,
+                            H_PUT_TCE_INDIRECT, 1);
+    if (!ret) {
+        ret = kvm_vm_enable_cap(kvm_state, KVM_CAP_PPC_ENABLE_HCALL, 0,
+                                H_STUFF_TCE, 1);
+    }
+
+    return ret;
+}
+
+void *kvmppc_create_spapr_tce(uint32_t liobn, uint32_t page_shift,
+                              uint64_t bus_offset, uint32_t nb_table,
+                              int *pfd, bool need_vfio)
+{
     long len;
     int fd;
     void *table;
@@ -2215,14 +2240,41 @@ void *kvmppc_create_spapr_tce(uint32_t liobn, uint32_t window_size, int *pfd,
         return NULL;
     }
 
-    fd = kvm_vm_ioctl(kvm_state, KVM_CREATE_SPAPR_TCE, &args);
-    if (fd < 0) {
-        fprintf(stderr, "KVM: Failed to create TCE table for liobn 0x%x\n",
-                liobn);
+    if (cap_spapr_tce_64) {
+        struct kvm_create_spapr_tce_64 args = {
+            .liobn = liobn,
+            .page_shift = page_shift,
+            .offset = bus_offset >> page_shift,
+            .size = nb_table,
+            .flags = 0
+        };
+        fd = kvm_vm_ioctl(kvm_state, KVM_CREATE_SPAPR_TCE_64, &args);
+        if (fd < 0) {
+            fprintf(stderr,
+                    "KVM: Failed to create TCE64 table for liobn 0x%x\n",
+                    liobn);
+            return NULL;
+        }
+    } else if (cap_spapr_tce) {
+        uint64_t window_size = (uint64_t) nb_table << page_shift;
+        struct kvm_create_spapr_tce args = {
+            .liobn = liobn,
+            .window_size = window_size,
+        };
+        if ((window_size != args.window_size) || bus_offset) {
+            return NULL;
+        }
+        fd = kvm_vm_ioctl(kvm_state, KVM_CREATE_SPAPR_TCE, &args);
+        if (fd < 0) {
+            fprintf(stderr, "KVM: Failed to create TCE table for liobn 0x%x\n",
+                    liobn);
+            return NULL;
+        }
+    } else {
         return NULL;
     }
 
-    len = (window_size / SPAPR_TCE_PAGE_SIZE) * sizeof(uint64_t);
+    len = nb_table * sizeof(uint64_t);
     /* FIXME: round this up to page size */
 
     table = mmap(NULL, len, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
@@ -2384,18 +2436,6 @@ bool kvmppc_has_cap_mmu_hash_v3(void)
     return cap_mmu_hash_v3;
 }
 
-static PowerPCCPUClass *ppc_cpu_get_family_class(PowerPCCPUClass *pcc)
-{
-    ObjectClass *oc = OBJECT_CLASS(pcc);
-
-    while (oc && !object_class_is_abstract(oc)) {
-        oc = object_class_get_parent(oc);
-    }
-    assert(oc);
-
-    return POWERPC_CPU_CLASS(oc);
-}
-
 PowerPCCPUClass *kvm_ppc_get_host_cpu_class(void)
 {
     uint32_t host_pvr = mfpvr();
@@ -2416,6 +2456,7 @@ static int kvm_ppc_register_host_cpu_type(void)
         .class_init = kvmppc_host_cpu_class_init,
     };
     PowerPCCPUClass *pvr_pcc;
+    ObjectClass *oc;
     DeviceClass *dc;
     int i;
 
@@ -2425,6 +2466,9 @@ static int kvm_ppc_register_host_cpu_type(void)
     }
     type_info.parent = object_class_get_name(OBJECT_CLASS(pvr_pcc));
     type_register(&type_info);
+
+    oc = object_class_by_name(type_info.name);
+    g_assert(oc);
 
 #if defined(TARGET_PPC64)
     type_info.name = g_strdup_printf("%s-"TYPE_SPAPR_CPU_CORE, "host");
@@ -2445,7 +2489,6 @@ static int kvm_ppc_register_host_cpu_type(void)
     dc = DEVICE_CLASS(ppc_cpu_get_family_class(pvr_pcc));
     for (i = 0; ppc_cpu_aliases[i].alias != NULL; i++) {
         if (strcmp(ppc_cpu_aliases[i].alias, dc->desc) == 0) {
-            ObjectClass *oc = OBJECT_CLASS(pvr_pcc);
             char *suffix;
 
             ppc_cpu_aliases[i].model = g_strdup(object_class_get_name(oc));
@@ -2676,4 +2719,107 @@ int kvmppc_enable_hwrng(void)
     }
 
     return kvmppc_enable_hcall(kvm_state, H_RANDOM);
+}
+
+void kvmppc_check_papr_resize_hpt(Error **errp)
+{
+    if (!kvm_enabled()) {
+        return; /* No KVM, we're good */
+    }
+
+    if (cap_resize_hpt) {
+        return; /* Kernel has explicit support, we're good */
+    }
+
+    /* Otherwise fallback on looking for PR KVM */
+    if (kvmppc_is_pr(kvm_state)) {
+        return;
+    }
+
+    error_setg(errp,
+               "Hash page table resizing not available with this KVM version");
+}
+
+int kvmppc_resize_hpt_prepare(PowerPCCPU *cpu, target_ulong flags, int shift)
+{
+    CPUState *cs = CPU(cpu);
+    struct kvm_ppc_resize_hpt rhpt = {
+        .flags = flags,
+        .shift = shift,
+    };
+
+    if (!cap_resize_hpt) {
+        return -ENOSYS;
+    }
+
+    return kvm_vm_ioctl(cs->kvm_state, KVM_PPC_RESIZE_HPT_PREPARE, &rhpt);
+}
+
+int kvmppc_resize_hpt_commit(PowerPCCPU *cpu, target_ulong flags, int shift)
+{
+    CPUState *cs = CPU(cpu);
+    struct kvm_ppc_resize_hpt rhpt = {
+        .flags = flags,
+        .shift = shift,
+    };
+
+    if (!cap_resize_hpt) {
+        return -ENOSYS;
+    }
+
+    return kvm_vm_ioctl(cs->kvm_state, KVM_PPC_RESIZE_HPT_COMMIT, &rhpt);
+}
+
+static void kvmppc_pivot_hpt_cpu(CPUState *cs, run_on_cpu_data arg)
+{
+    target_ulong sdr1 = arg.target_ptr;
+    PowerPCCPU *cpu = POWERPC_CPU(cs);
+    CPUPPCState *env = &cpu->env;
+
+    /* This is just for the benefit of PR KVM */
+    cpu_synchronize_state(cs);
+    env->spr[SPR_SDR1] = sdr1;
+    if (kvmppc_put_books_sregs(cpu) < 0) {
+        error_report("Unable to update SDR1 in KVM");
+        exit(1);
+    }
+}
+
+void kvmppc_update_sdr1(target_ulong sdr1)
+{
+    CPUState *cs;
+
+    CPU_FOREACH(cs) {
+        run_on_cpu(cs, kvmppc_pivot_hpt_cpu, RUN_ON_CPU_TARGET_PTR(sdr1));
+    }
+}
+
+/*
+ * This is a helper function to detect a post migration scenario
+ * in which a guest, running as KVM-HV, freezes in cpu_post_load because
+ * the guest kernel can't handle a PVR value other than the actual host
+ * PVR in KVM_SET_SREGS, even if pvr_match() returns true.
+ *
+ * If we don't have cap_ppc_pvr_compat and we're not running in PR
+ * (so, we're HV), return true. The workaround itself is done in
+ * cpu_post_load.
+ *
+ * The order here is important: we'll only check for KVM PR as a
+ * fallback if the guest kernel can't handle the situation itself.
+ * We need to avoid as much as possible querying the running KVM type
+ * in QEMU level.
+ */
+bool kvmppc_pvr_workaround_required(PowerPCCPU *cpu)
+{
+    CPUState *cs = CPU(cpu);
+
+    if (!kvm_enabled()) {
+        return false;
+    }
+
+    if (cap_ppc_pvr_compat) {
+        return false;
+    }
+
+    return !kvmppc_is_pr(cs->kvm_state);
 }
