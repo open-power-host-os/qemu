@@ -2061,14 +2061,22 @@ static int vfio_add_std_cap(VFIOPCIDevice *vdev, uint8_t pos, Error **errp)
     if (next) {
         ret = vfio_add_std_cap(vdev, next, errp);
         if (ret) {
-            goto out;
+            return ret;
         }
     } else {
         /* Begin the rebuild, use QEMU emulated list bits */
         pdev->config[PCI_CAPABILITY_LIST] = 0;
         vdev->emulated_config_bits[PCI_CAPABILITY_LIST] = 0xff;
         vdev->emulated_config_bits[PCI_STATUS] |= PCI_STATUS_CAP_LIST;
+
+        ret = vfio_add_virt_caps(vdev, errp);
+        if (ret) {
+            return ret;
+        }
     }
+
+    /* Scale down size, esp in case virt caps were added above */
+    size = MIN(size, vfio_std_cap_max_size(pdev, pos));
 
     /* Use emulated next pointer to allow dropping caps */
     pci_set_byte(vdev->emulated_config_bits + pos + PCI_CAP_LIST_NEXT, 0xff);
@@ -2097,7 +2105,7 @@ static int vfio_add_std_cap(VFIOPCIDevice *vdev, uint8_t pos, Error **errp)
         ret = pci_add_capability(pdev, cap_id, pos, size, errp);
         break;
     }
-out:
+
     if (ret < 0) {
         error_prepend(errp,
                       "failed to add PCI capability 0x%x[0x%x]@0x%x: ",
@@ -3197,6 +3205,8 @@ static void vfio_instance_init(Object *obj)
     vdev->host.bus = ~0U;
     vdev->host.slot = ~0U;
     vdev->host.function = ~0U;
+
+    vdev->nv_gpudirect_clique = 0xFF;
 }
 
 static Property vfio_pci_dev_properties[] = {
@@ -3221,6 +3231,9 @@ static Property vfio_pci_dev_properties[] = {
     DEFINE_PROP_UINT32("x-pci-sub-device-id", VFIOPCIDevice,
                        sub_device_id, PCI_ANY_ID),
     DEFINE_PROP_UINT32("x-igd-gms", VFIOPCIDevice, igd_gms, 0),
+    DEFINE_PROP_UNSIGNED_NODEFAULT("x-nv-gpudirect-clique", VFIOPCIDevice,
+                                   nv_gpudirect_clique,
+                                   qdev_prop_nv_gpudirect_clique, uint8_t),
     /*
      * TODO - support passed fds... is this necessary?
      * DEFINE_PROP_STRING("vfiofd", VFIOPCIDevice, vfiofd_name),
@@ -3258,6 +3271,11 @@ static const TypeInfo vfio_pci_dev_info = {
     .class_init = vfio_pci_dev_class_init,
     .instance_init = vfio_instance_init,
     .instance_finalize = vfio_instance_finalize,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_PCIE_DEVICE },
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { }
+    },
 };
 
 static void register_vfio_pci_dev_type(void)

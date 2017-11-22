@@ -208,7 +208,7 @@ static char *child_job_get_parent_desc(BdrvChild *c)
 {
     BlockJob *job = c->opaque;
     return g_strdup_printf("%s job '%s'",
-                           BlockJobType_lookup[job->driver->job_type],
+                           BlockJobType_str(job->driver->job_type),
                            job->id);
 }
 
@@ -553,7 +553,7 @@ BlockJobInfo *block_job_query(BlockJob *job, Error **errp)
         return NULL;
     }
     info = g_new0(BlockJobInfo, 1);
-    info->type      = g_strdup(BlockJobType_lookup[job->driver->job_type]);
+    info->type      = g_strdup(BlockJobType_str(job->driver->job_type));
     info->device    = g_strdup(job->id);
     info->len       = job->len;
     info->busy      = job->busy;
@@ -666,7 +666,7 @@ void *block_job_create(const char *job_id, const BlockJobDriver *driver,
     job->refcnt        = 1;
 
     error_setg(&job->blocker, "block device is in use by block job: %s",
-               BlockJobType_lookup[driver->job_type]);
+               BlockJobType_str(driver->job_type));
     block_job_add_bdrv(job, "main node", bs, 0, BLK_PERM_ALL, &error_abort);
     bs->job = job;
 
@@ -797,11 +797,14 @@ void block_job_sleep_ns(BlockJob *job, QEMUClockType type, int64_t ns)
         return;
     }
 
-    job->busy = false;
+    /* We need to leave job->busy set here, because when we have
+     * put a coroutine to 'sleep', we have scheduled it to run in
+     * the future.  We cannot enter that same coroutine again before
+     * it wakes and runs, otherwise we risk double-entry or entry after
+     * completion. */
     if (!block_job_should_pause(job)) {
         co_aio_sleep_ns(blk_get_aio_context(job->blk), type, ns);
     }
-    job->busy = true;
 
     block_job_pause_point(job);
 }
