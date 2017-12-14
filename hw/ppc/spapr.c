@@ -1373,6 +1373,8 @@ void spapr_reallocate_hpt(sPAPRMachineState *spapr, int shift,
             DIRTY_HPTE(HPTE(spapr->htab, i));
         }
     }
+    /* We're setting up a hash table, so that means we're not radix */
+    spapr->patb_entry = 0;
 }
 
 void spapr_setup_hpt_and_vrma(sPAPRMachineState *spapr)
@@ -1384,7 +1386,10 @@ void spapr_setup_hpt_and_vrma(sPAPRMachineState *spapr)
             && !spapr_ovec_test(spapr->ov5_cas, OV5_HPT_RESIZE))) {
         hpt_shift = spapr_hpt_shift_for_ramsize(MACHINE(spapr)->maxram_size);
     } else {
-        hpt_shift = spapr_hpt_shift_for_ramsize(MACHINE(spapr)->ram_size);
+        uint64_t current_ram_size;
+
+        current_ram_size = MACHINE(spapr)->ram_size + get_plugged_memory_size();
+        hpt_shift = spapr_hpt_shift_for_ramsize(current_ram_size);
     }
     spapr_reallocate_hpt(spapr, hpt_shift, &error_fatal);
 
@@ -1392,8 +1397,6 @@ void spapr_setup_hpt_and_vrma(sPAPRMachineState *spapr)
         spapr->rma_size = kvmppc_rma_size(spapr_node0_size(MACHINE(spapr)),
                                           spapr->htab_shift);
     }
-    /* We're setting up a hash table, so that means we're not radix */
-    spapr->patb_entry = 0;
 }
 
 static void find_unknown_sysbus_device(SysBusDevice *sbdev, void *opaque)
@@ -1570,7 +1573,7 @@ static int spapr_post_load(void *opaque, int version_id)
         err = spapr_rtc_import_offset(&spapr->rtc, spapr->rtc_offset);
     }
 
-    if (spapr->patb_entry) {
+    if (kvm_enabled() && spapr->patb_entry) {
         PowerPCCPU *cpu = POWERPC_CPU(first_cpu);
         bool radix = !!(spapr->patb_entry & PATBE1_GR);
         bool gtse = !!(cpu->env.spr[SPR_LPCR] & LPCR_GTSE);
@@ -2663,6 +2666,10 @@ static char *spapr_get_fw_dev_path(FWPathProvider *p, BusState *bus,
              * swap 0100 or 10 << or 20 << ( target lun-id -- srplun )
              */
             unsigned id = 0x1000000 | (d->id << 16) | d->lun;
+            if (d->lun >= 256) {
+                /* Use the LUN "flat space addressing method" */
+                id |= 0x4000;
+            }
             return g_strdup_printf("%s@%"PRIX64, qdev_fw_name(dev),
                                    (uint64_t)id << 32);
         } else if (usb) {
