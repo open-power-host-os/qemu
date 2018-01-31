@@ -1487,12 +1487,13 @@ static int target_setup_sigframe(struct target_rt_sigframe *sf,
     }
 
     for (i = 0; i < 32; i++) {
+        uint64_t *q = aa64_vfp_qreg(env, i);
 #ifdef TARGET_WORDS_BIGENDIAN
-        __put_user(env->vfp.regs[i * 2], &aux->fpsimd.vregs[i * 2 + 1]);
-        __put_user(env->vfp.regs[i * 2 + 1], &aux->fpsimd.vregs[i * 2]);
+        __put_user(q[0], &aux->fpsimd.vregs[i * 2 + 1]);
+        __put_user(q[1], &aux->fpsimd.vregs[i * 2]);
 #else
-        __put_user(env->vfp.regs[i * 2], &aux->fpsimd.vregs[i * 2]);
-        __put_user(env->vfp.regs[i * 2 + 1], &aux->fpsimd.vregs[i * 2 + 1]);
+        __put_user(q[0], &aux->fpsimd.vregs[i * 2]);
+        __put_user(q[1], &aux->fpsimd.vregs[i * 2 + 1]);
 #endif
     }
     __put_user(vfp_get_fpsr(env), &aux->fpsimd.fpsr);
@@ -1539,12 +1540,13 @@ static int target_restore_sigframe(CPUARMState *env,
     }
 
     for (i = 0; i < 32; i++) {
+        uint64_t *q = aa64_vfp_qreg(env, i);
 #ifdef TARGET_WORDS_BIGENDIAN
-        __get_user(env->vfp.regs[i * 2], &aux->fpsimd.vregs[i * 2 + 1]);
-        __get_user(env->vfp.regs[i * 2 + 1], &aux->fpsimd.vregs[i * 2]);
+        __get_user(q[0], &aux->fpsimd.vregs[i * 2 + 1]);
+        __get_user(q[1], &aux->fpsimd.vregs[i * 2]);
 #else
-        __get_user(env->vfp.regs[i * 2], &aux->fpsimd.vregs[i * 2]);
-        __get_user(env->vfp.regs[i * 2 + 1], &aux->fpsimd.vregs[i * 2 + 1]);
+        __get_user(q[0], &aux->fpsimd.vregs[i * 2]);
+        __get_user(q[1], &aux->fpsimd.vregs[i * 2 + 1]);
 #endif
     }
     __get_user(fpsr, &aux->fpsimd.fpsr);
@@ -1599,9 +1601,13 @@ static void target_setup_frame(int usig, struct target_sigaction *ka,
     if (ka->sa_flags & TARGET_SA_RESTORER) {
         return_addr = ka->sa_restorer;
     } else {
-        /* mov x8,#__NR_rt_sigreturn; svc #0 */
-        __put_user(0xd2801168, &frame->tramp[0]);
-        __put_user(0xd4000001, &frame->tramp[1]);
+        /*
+         * mov x8,#__NR_rt_sigreturn; svc #0
+         * Since these are instructions they need to be put as little-endian
+         * regardless of target default or current CPU endianness.
+         */
+        __put_user_e(0xd2801168, &frame->tramp[0], le);
+        __put_user_e(0xd4000001, &frame->tramp[1], le);
         return_addr = frame_addr + offsetof(struct target_rt_sigframe, tramp);
     }
     env->xregs[0] = usig;
@@ -1899,7 +1905,7 @@ static abi_ulong *setup_sigframe_v2_vfp(abi_ulong *regspace, CPUARMState *env)
     __put_user(TARGET_VFP_MAGIC, &vfpframe->magic);
     __put_user(sizeof(*vfpframe), &vfpframe->size);
     for (i = 0; i < 32; i++) {
-        __put_user(float64_val(env->vfp.regs[i]), &vfpframe->ufp.fpregs[i]);
+        __put_user(*aa32_vfp_dreg(env, i), &vfpframe->ufp.fpregs[i]);
     }
     __put_user(vfp_get_fpscr(env), &vfpframe->ufp.fpscr);
     __put_user(env->vfp.xregs[ARM_VFP_FPEXC], &vfpframe->ufp_exc.fpexc);
@@ -2206,7 +2212,7 @@ static abi_ulong *restore_sigframe_v2_vfp(CPUARMState *env, abi_ulong *regspace)
         return 0;
     }
     for (i = 0; i < 32; i++) {
-        __get_user(float64_val(env->vfp.regs[i]), &vfpframe->ufp.fpregs[i]);
+        __get_user(*aa32_vfp_dreg(env, i), &vfpframe->ufp.fpregs[i]);
     }
     __get_user(fpscr, &vfpframe->ufp.fpscr);
     vfp_set_fpscr(env, fpscr);
@@ -5612,13 +5618,14 @@ struct target_rt_sigframe
 static void setup_sigcontext(struct target_sigcontext *sc, CPUM68KState *env,
                              abi_ulong mask)
 {
+    uint32_t sr = (env->sr & 0xff00) | cpu_m68k_get_ccr(env);
     __put_user(mask, &sc->sc_mask);
     __put_user(env->aregs[7], &sc->sc_usp);
     __put_user(env->dregs[0], &sc->sc_d0);
     __put_user(env->dregs[1], &sc->sc_d1);
     __put_user(env->aregs[0], &sc->sc_a0);
     __put_user(env->aregs[1], &sc->sc_a1);
-    __put_user(env->sr, &sc->sc_sr);
+    __put_user(sr, &sc->sc_sr);
     __put_user(env->pc, &sc->sc_pc);
 }
 
@@ -5634,7 +5641,7 @@ restore_sigcontext(CPUM68KState *env, struct target_sigcontext *sc)
     __get_user(env->aregs[1], &sc->sc_a1);
     __get_user(env->pc, &sc->sc_pc);
     __get_user(temp, &sc->sc_sr);
-    env->sr = (env->sr & 0xff00) | (temp & 0xff);
+    cpu_m68k_set_ccr(env, temp);
 }
 
 /*
@@ -5726,7 +5733,7 @@ static inline int target_rt_setup_ucontext(struct target_ucontext *uc,
                                            CPUM68KState *env)
 {
     target_greg_t *gregs = uc->tuc_mcontext.gregs;
-    uint32_t sr = cpu_m68k_get_ccr(env);
+    uint32_t sr = (env->sr & 0xff00) | cpu_m68k_get_ccr(env);
 
     __put_user(TARGET_MCONTEXT_VERSION, &uc->tuc_mcontext.version);
     __put_user(env->dregs[0], &gregs[0]);
@@ -6530,7 +6537,7 @@ static void setup_rt_frame(int sig, struct target_sigaction *ka,
         haddr = dest;
     }
     env->iaoq_f = haddr;
-    env->iaoq_b = haddr + 4;;
+    env->iaoq_b = haddr + 4;
     return;
 
  give_sigsegv:

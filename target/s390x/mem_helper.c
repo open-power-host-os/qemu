@@ -39,10 +39,10 @@
    NULL, it means that the function was called in C code (i.e. not
    from generated code or from helper.c) */
 /* XXX: fix it to restore all registers */
-void tlb_fill(CPUState *cs, target_ulong addr, MMUAccessType access_type,
-              int mmu_idx, uintptr_t retaddr)
+void tlb_fill(CPUState *cs, target_ulong addr, int size,
+              MMUAccessType access_type, int mmu_idx, uintptr_t retaddr)
 {
-    int ret = s390_cpu_handle_mmu_fault(cs, addr, access_type, mmu_idx);
+    int ret = s390_cpu_handle_mmu_fault(cs, addr, size, access_type, mmu_idx);
     if (unlikely(ret != 0)) {
         cpu_loop_exit_restore(cs, retaddr);
     }
@@ -85,9 +85,7 @@ static inline void check_alignment(CPUS390XState *env, uint64_t v,
                                    int wordsize, uintptr_t ra)
 {
     if (v % wordsize) {
-        CPUState *cs = CPU(s390_env_get_cpu(env));
-        cpu_restore_state(cs, ra);
-        program_interrupt(env, PGM_SPECIFICATION, 6);
+        s390_program_interrupt(env, PGM_SPECIFICATION, 6, ra);
     }
 }
 
@@ -545,8 +543,7 @@ void HELPER(srst)(CPUS390XState *env, uint32_t r1, uint32_t r2)
 
     /* Bits 32-55 must contain all 0.  */
     if (env->regs[0] & 0xffffff00u) {
-        cpu_restore_state(ENV_GET_CPU(env), ra);
-        program_interrupt(env, PGM_SPECIFICATION, 6);
+        s390_program_interrupt(env, PGM_SPECIFICATION, 6, ra);
     }
 
     str = get_address(env, r2);
@@ -583,8 +580,7 @@ void HELPER(srstu)(CPUS390XState *env, uint32_t r1, uint32_t r2)
 
     /* Bits 32-47 of R0 must be zero.  */
     if (env->regs[0] & 0xffff0000u) {
-        cpu_restore_state(ENV_GET_CPU(env), ra);
-        program_interrupt(env, PGM_SPECIFICATION, 6);
+        s390_program_interrupt(env, PGM_SPECIFICATION, 6, ra);
     }
 
     str = get_address(env, r2);
@@ -1444,7 +1440,7 @@ static uint32_t do_csst(CPUS390XState *env, uint32_t r3, uint64_t a1,
 
     /* Sanity check writability of the store address.  */
 #ifndef CONFIG_USER_ONLY
-    probe_write(env, a2, mem_idx, ra);
+    probe_write(env, a2, 0, mem_idx, ra);
 #endif
 
     /* Note that the compare-and-swap is atomic, and the store is atomic, but
@@ -1600,8 +1596,7 @@ static uint32_t do_csst(CPUS390XState *env, uint32_t r3, uint64_t a1,
     return cc;
 
  spec_exception:
-    cpu_restore_state(ENV_GET_CPU(env), ra);
-    program_interrupt(env, PGM_SPECIFICATION, 6);
+    s390_program_interrupt(env, PGM_SPECIFICATION, 6, ra);
     g_assert_not_reached();
 }
 
@@ -1722,10 +1717,44 @@ uint32_t HELPER(testblock)(CPUS390XState *env, uint64_t real_addr)
     return 0;
 }
 
-uint32_t HELPER(tprot)(uint64_t a1, uint64_t a2)
+uint32_t HELPER(tprot)(CPUS390XState *env, uint64_t a1, uint64_t a2)
 {
-    /* XXX implement */
-    return 0;
+    S390CPU *cpu = s390_env_get_cpu(env);
+    CPUState *cs = CPU(cpu);
+
+    /*
+     * TODO: we currently don't handle all access protection types
+     * (including access-list and key-controlled) as well as AR mode.
+     */
+    if (!s390_cpu_virt_mem_check_write(cpu, a1, 0, 1)) {
+        /* Fetching permitted; storing permitted */
+        return 0;
+    }
+
+    if (env->int_pgm_code == PGM_PROTECTION) {
+        /* retry if reading is possible */
+        cs->exception_index = 0;
+        if (!s390_cpu_virt_mem_check_read(cpu, a1, 0, 1)) {
+            /* Fetching permitted; storing not permitted */
+            return 1;
+        }
+    }
+
+    switch (env->int_pgm_code) {
+    case PGM_PROTECTION:
+        /* Fetching not permitted; storing not permitted */
+        cs->exception_index = 0;
+        return 2;
+    case PGM_ADDRESSING:
+    case PGM_TRANS_SPEC:
+        /* exceptions forwarded to the guest */
+        s390_cpu_virt_mem_handle_exc(cpu, GETPC());
+        return 0;
+    }
+
+    /* Translation not available */
+    cs->exception_index = 0;
+    return 3;
 }
 
 /* insert storage key extended */
@@ -1865,8 +1894,7 @@ void HELPER(idte)(CPUS390XState *env, uint64_t r1, uint64_t r2, uint32_t m4)
     uint16_t entries, i, index = 0;
 
     if (r2 & 0xff000) {
-        cpu_restore_state(cs, ra);
-        program_interrupt(env, PGM_SPECIFICATION, 4);
+        s390_program_interrupt(env, PGM_SPECIFICATION, 4, ra);
     }
 
     if (!(r2 & 0x800)) {
@@ -2014,8 +2042,7 @@ uint64_t HELPER(lra)(CPUS390XState *env, uint64_t addr)
 
     /* XXX incomplete - has more corner cases */
     if (!(env->psw.mask & PSW_MASK_64) && (addr >> 32)) {
-        cpu_restore_state(cs, GETPC());
-        program_interrupt(env, PGM_SPECIAL_OP, 2);
+        s390_program_interrupt(env, PGM_SPECIAL_OP, 2, GETPC());
     }
 
     old_exc = cs->exception_index;
@@ -2185,7 +2212,6 @@ uint32_t HELPER(mvcos)(CPUS390XState *env, uint64_t dest, uint64_t src,
     const uint8_t psw_as = (env->psw.mask & PSW_MASK_ASC) >> PSW_SHIFT_ASC;
     const uint64_t r0 = env->regs[0];
     const uintptr_t ra = GETPC();
-    CPUState *cs = CPU(s390_env_get_cpu(env));
     uint8_t dest_key, dest_as, dest_k, dest_a;
     uint8_t src_key, src_as, src_k, src_a;
     uint64_t val;
@@ -2195,8 +2221,7 @@ uint32_t HELPER(mvcos)(CPUS390XState *env, uint64_t dest, uint64_t src,
                __func__, dest, src, len);
 
     if (!(env->psw.mask & PSW_MASK_DAT)) {
-        cpu_restore_state(cs, ra);
-        program_interrupt(env, PGM_SPECIAL_OP, 6);
+        s390_program_interrupt(env, PGM_SPECIAL_OP, 6, ra);
     }
 
     /* OAC (operand access control) for the first operand -> dest */
@@ -2227,17 +2252,14 @@ uint32_t HELPER(mvcos)(CPUS390XState *env, uint64_t dest, uint64_t src,
     }
 
     if (dest_a && dest_as == AS_HOME && (env->psw.mask & PSW_MASK_PSTATE)) {
-        cpu_restore_state(cs, ra);
-        program_interrupt(env, PGM_SPECIAL_OP, 6);
+        s390_program_interrupt(env, PGM_SPECIAL_OP, 6, ra);
     }
     if (!(env->cregs[0] & CR0_SECONDARY) &&
         (dest_as == AS_SECONDARY || src_as == AS_SECONDARY)) {
-        cpu_restore_state(cs, ra);
-        program_interrupt(env, PGM_SPECIAL_OP, 6);
+        s390_program_interrupt(env, PGM_SPECIAL_OP, 6, ra);
     }
     if (!psw_key_valid(env, dest_key) || !psw_key_valid(env, src_key)) {
-        cpu_restore_state(cs, ra);
-        program_interrupt(env, PGM_PRIVILEGED, 6);
+        s390_program_interrupt(env, PGM_PRIVILEGED, 6, ra);
     }
 
     len = wrap_length(env, len);
@@ -2251,8 +2273,7 @@ uint32_t HELPER(mvcos)(CPUS390XState *env, uint64_t dest, uint64_t src,
         (env->psw.mask & PSW_MASK_PSTATE)) {
         qemu_log_mask(LOG_UNIMP, "%s: AR-mode and PSTATE support missing\n",
                       __func__);
-        cpu_restore_state(cs, ra);
-        program_interrupt(env, PGM_ADDRESSING, 6);
+        s390_program_interrupt(env, PGM_ADDRESSING, 6, ra);
     }
 
     /* FIXME: a) LAP

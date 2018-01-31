@@ -112,7 +112,7 @@ enum {
 #define ARM_CPU_VIRQ 2
 #define ARM_CPU_VFIQ 3
 
-#define NB_MMU_MODES 7
+#define NB_MMU_MODES 8
 /* ARM-specific extra insn start words:
  * 1: Conditional execution bits
  * 2: Partial exception syndrome for data aborts
@@ -492,7 +492,7 @@ typedef struct CPUARMState {
          * the two execution states, and means we do not need to explicitly
          * map these registers when changing states.
          */
-        float64 regs[64];
+        uint64_t regs[64];
 
         uint32_t xregs[16];
         /* We store these fpcsr fields separately for convenience.  */
@@ -1340,6 +1340,7 @@ enum arm_features {
     ARM_FEATURE_VBAR, /* has cp15 VBAR */
     ARM_FEATURE_M_SECURITY, /* M profile Security Extension */
     ARM_FEATURE_JAZELLE, /* has (trivial) Jazelle implementation */
+    ARM_FEATURE_SVE, /* has Scalable Vector Extension */
 };
 
 static inline int arm_feature(CPUARMState *env, int feature)
@@ -2226,13 +2227,13 @@ static inline bool arm_excp_unmasked(CPUState *cs, unsigned int excp_idx,
  * They have the following different MMU indexes:
  *  User
  *  Privileged
- *  Execution priority negative (this is like privileged, but the
- *  MPU HFNMIENA bit means that it may have different access permission
- *  check results to normal privileged code, so can't share a TLB).
+ *  User, execution priority negative (ie the MPU HFNMIENA bit may apply)
+ *  Privileged, execution priority negative (ditto)
  * If the CPU supports the v8M Security Extension then there are also:
  *  Secure User
  *  Secure Privileged
- *  Secure, execution priority negative
+ *  Secure User, execution priority negative
+ *  Secure Privileged, execution priority negative
  *
  * The ARMMMUIdx and the mmu index value used by the core QEMU TLB code
  * are not quite the same -- different CPU types (most notably M profile
@@ -2251,10 +2252,17 @@ static inline bool arm_excp_unmasked(CPUState *cs, unsigned int excp_idx,
  * The constant names here are patterned after the general style of the names
  * of the AT/ATS operations.
  * The values used are carefully arranged to make mmu_idx => EL lookup easy.
+ * For M profile we arrange them to have a bit for priv, a bit for negpri
+ * and a bit for secure.
  */
 #define ARM_MMU_IDX_A 0x10 /* A profile */
 #define ARM_MMU_IDX_NOTLB 0x20 /* does not have a TLB */
 #define ARM_MMU_IDX_M 0x40 /* M profile */
+
+/* meanings of the bits for M profile mmu idx values */
+#define ARM_MMU_IDX_M_PRIV 0x1
+#define ARM_MMU_IDX_M_NEGPRI 0x2
+#define ARM_MMU_IDX_M_S 0x4
 
 #define ARM_MMU_IDX_TYPE_MASK (~0x7)
 #define ARM_MMU_IDX_COREIDX_MASK 0x7
@@ -2269,10 +2277,12 @@ typedef enum ARMMMUIdx {
     ARMMMUIdx_S2NS = 6 | ARM_MMU_IDX_A,
     ARMMMUIdx_MUser = 0 | ARM_MMU_IDX_M,
     ARMMMUIdx_MPriv = 1 | ARM_MMU_IDX_M,
-    ARMMMUIdx_MNegPri = 2 | ARM_MMU_IDX_M,
-    ARMMMUIdx_MSUser = 3 | ARM_MMU_IDX_M,
-    ARMMMUIdx_MSPriv = 4 | ARM_MMU_IDX_M,
-    ARMMMUIdx_MSNegPri = 5 | ARM_MMU_IDX_M,
+    ARMMMUIdx_MUserNegPri = 2 | ARM_MMU_IDX_M,
+    ARMMMUIdx_MPrivNegPri = 3 | ARM_MMU_IDX_M,
+    ARMMMUIdx_MSUser = 4 | ARM_MMU_IDX_M,
+    ARMMMUIdx_MSPriv = 5 | ARM_MMU_IDX_M,
+    ARMMMUIdx_MSUserNegPri = 6 | ARM_MMU_IDX_M,
+    ARMMMUIdx_MSPrivNegPri = 7 | ARM_MMU_IDX_M,
     /* Indexes below here don't have TLBs and are used only for AT system
      * instructions or for the first stage of an S12 page table walk.
      */
@@ -2293,10 +2303,12 @@ typedef enum ARMMMUIdxBit {
     ARMMMUIdxBit_S2NS = 1 << 6,
     ARMMMUIdxBit_MUser = 1 << 0,
     ARMMMUIdxBit_MPriv = 1 << 1,
-    ARMMMUIdxBit_MNegPri = 1 << 2,
-    ARMMMUIdxBit_MSUser = 1 << 3,
-    ARMMMUIdxBit_MSPriv = 1 << 4,
-    ARMMMUIdxBit_MSNegPri = 1 << 5,
+    ARMMMUIdxBit_MUserNegPri = 1 << 2,
+    ARMMMUIdxBit_MPrivNegPri = 1 << 3,
+    ARMMMUIdxBit_MSUser = 1 << 4,
+    ARMMMUIdxBit_MSPriv = 1 << 5,
+    ARMMMUIdxBit_MSUserNegPri = 1 << 6,
+    ARMMMUIdxBit_MSPrivNegPri = 1 << 7,
 } ARMMMUIdxBit;
 
 #define MMU_USER_IDX 0
@@ -2322,31 +2334,43 @@ static inline int arm_mmu_idx_to_el(ARMMMUIdx mmu_idx)
     case ARM_MMU_IDX_A:
         return mmu_idx & 3;
     case ARM_MMU_IDX_M:
-        return (mmu_idx == ARMMMUIdx_MUser || mmu_idx == ARMMMUIdx_MSUser)
-            ? 0 : 1;
+        return mmu_idx & ARM_MMU_IDX_M_PRIV;
     default:
         g_assert_not_reached();
     }
+}
+
+/* Return the MMU index for a v7M CPU in the specified security and
+ * privilege state
+ */
+static inline ARMMMUIdx arm_v7m_mmu_idx_for_secstate_and_priv(CPUARMState *env,
+                                                              bool secstate,
+                                                              bool priv)
+{
+    ARMMMUIdx mmu_idx = ARM_MMU_IDX_M;
+
+    if (priv) {
+        mmu_idx |= ARM_MMU_IDX_M_PRIV;
+    }
+
+    if (armv7m_nvic_neg_prio_requested(env->nvic, secstate)) {
+        mmu_idx |= ARM_MMU_IDX_M_NEGPRI;
+    }
+
+    if (secstate) {
+        mmu_idx |= ARM_MMU_IDX_M_S;
+    }
+
+    return mmu_idx;
 }
 
 /* Return the MMU index for a v7M CPU in the specified security state */
 static inline ARMMMUIdx arm_v7m_mmu_idx_for_secstate(CPUARMState *env,
                                                      bool secstate)
 {
-    int el = arm_current_el(env);
-    ARMMMUIdx mmu_idx;
+    bool priv = arm_current_el(env) != 0;
 
-    if (el == 0) {
-        mmu_idx = secstate ? ARMMMUIdx_MSUser : ARMMMUIdx_MUser;
-    } else {
-        mmu_idx = secstate ? ARMMMUIdx_MSPriv : ARMMMUIdx_MPriv;
-    }
-
-    if (armv7m_nvic_neg_prio_requested(env->nvic, secstate)) {
-        mmu_idx = secstate ? ARMMMUIdx_MSNegPri : ARMMMUIdx_MNegPri;
-    }
-
-    return mmu_idx;
+    return arm_v7m_mmu_idx_for_secstate_and_priv(env, secstate, priv);
 }
 
 /* Determine the current mmu_idx to use for normal loads/stores */
@@ -2643,71 +2667,6 @@ static inline bool bswap_code(bool sctlr_b)
 #endif
 }
 
-/* Return the exception level to which FP-disabled exceptions should
- * be taken, or 0 if FP is enabled.
- */
-static inline int fp_exception_el(CPUARMState *env)
-{
-    int fpen;
-    int cur_el = arm_current_el(env);
-
-    /* CPACR and the CPTR registers don't exist before v6, so FP is
-     * always accessible
-     */
-    if (!arm_feature(env, ARM_FEATURE_V6)) {
-        return 0;
-    }
-
-    /* The CPACR controls traps to EL1, or PL1 if we're 32 bit:
-     * 0, 2 : trap EL0 and EL1/PL1 accesses
-     * 1    : trap only EL0 accesses
-     * 3    : trap no accesses
-     */
-    fpen = extract32(env->cp15.cpacr_el1, 20, 2);
-    switch (fpen) {
-    case 0:
-    case 2:
-        if (cur_el == 0 || cur_el == 1) {
-            /* Trap to PL1, which might be EL1 or EL3 */
-            if (arm_is_secure(env) && !arm_el_is_aa64(env, 3)) {
-                return 3;
-            }
-            return 1;
-        }
-        if (cur_el == 3 && !is_a64(env)) {
-            /* Secure PL1 running at EL3 */
-            return 3;
-        }
-        break;
-    case 1:
-        if (cur_el == 0) {
-            return 1;
-        }
-        break;
-    case 3:
-        break;
-    }
-
-    /* For the CPTR registers we don't need to guard with an ARM_FEATURE
-     * check because zero bits in the registers mean "don't trap".
-     */
-
-    /* CPTR_EL2 : present in v7VE or v8 */
-    if (cur_el <= 2 && extract32(env->cp15.cptr_el[2], 10, 1)
-        && !arm_is_secure_below_el3(env)) {
-        /* Trap FP ops at EL2, NS-EL1 or NS-EL0 to EL2 */
-        return 2;
-    }
-
-    /* CPTR_EL3 : present in v8 */
-    if (extract32(env->cp15.cptr_el[3], 10, 1)) {
-        /* Trap all FP ops to EL3 */
-        return 3;
-    }
-
-    return 0;
-}
-
 #ifdef CONFIG_USER_ONLY
 static inline bool arm_cpu_bswap_data(CPUARMState *env)
 {
@@ -2754,66 +2713,8 @@ static inline uint32_t arm_regime_tbi1(CPUARMState *env, ARMMMUIdx mmu_idx)
 }
 #endif
 
-static inline void cpu_get_tb_cpu_state(CPUARMState *env, target_ulong *pc,
-                                        target_ulong *cs_base, uint32_t *flags)
-{
-    ARMMMUIdx mmu_idx = core_to_arm_mmu_idx(env, cpu_mmu_index(env, false));
-    if (is_a64(env)) {
-        *pc = env->pc;
-        *flags = ARM_TBFLAG_AARCH64_STATE_MASK;
-        /* Get control bits for tagged addresses */
-        *flags |= (arm_regime_tbi0(env, mmu_idx) << ARM_TBFLAG_TBI0_SHIFT);
-        *flags |= (arm_regime_tbi1(env, mmu_idx) << ARM_TBFLAG_TBI1_SHIFT);
-    } else {
-        *pc = env->regs[15];
-        *flags = (env->thumb << ARM_TBFLAG_THUMB_SHIFT)
-            | (env->vfp.vec_len << ARM_TBFLAG_VECLEN_SHIFT)
-            | (env->vfp.vec_stride << ARM_TBFLAG_VECSTRIDE_SHIFT)
-            | (env->condexec_bits << ARM_TBFLAG_CONDEXEC_SHIFT)
-            | (arm_sctlr_b(env) << ARM_TBFLAG_SCTLR_B_SHIFT);
-        if (!(access_secure_reg(env))) {
-            *flags |= ARM_TBFLAG_NS_MASK;
-        }
-        if (env->vfp.xregs[ARM_VFP_FPEXC] & (1 << 30)
-            || arm_el_is_aa64(env, 1)) {
-            *flags |= ARM_TBFLAG_VFPEN_MASK;
-        }
-        *flags |= (extract32(env->cp15.c15_cpar, 0, 2)
-                   << ARM_TBFLAG_XSCALE_CPAR_SHIFT);
-    }
-
-    *flags |= (arm_to_core_mmu_idx(mmu_idx) << ARM_TBFLAG_MMUIDX_SHIFT);
-
-    /* The SS_ACTIVE and PSTATE_SS bits correspond to the state machine
-     * states defined in the ARM ARM for software singlestep:
-     *  SS_ACTIVE   PSTATE.SS   State
-     *     0            x       Inactive (the TB flag for SS is always 0)
-     *     1            0       Active-pending
-     *     1            1       Active-not-pending
-     */
-    if (arm_singlestep_active(env)) {
-        *flags |= ARM_TBFLAG_SS_ACTIVE_MASK;
-        if (is_a64(env)) {
-            if (env->pstate & PSTATE_SS) {
-                *flags |= ARM_TBFLAG_PSTATE_SS_MASK;
-            }
-        } else {
-            if (env->uncached_cpsr & PSTATE_SS) {
-                *flags |= ARM_TBFLAG_PSTATE_SS_MASK;
-            }
-        }
-    }
-    if (arm_cpu_data_is_big_endian(env)) {
-        *flags |= ARM_TBFLAG_BE_DATA_MASK;
-    }
-    *flags |= fp_exception_el(env) << ARM_TBFLAG_FPEXC_EL_SHIFT;
-
-    if (arm_v7m_is_handler_mode(env)) {
-        *flags |= ARM_TBFLAG_HANDLER_MASK;
-    }
-
-    *cs_base = 0;
-}
+void cpu_get_tb_cpu_state(CPUARMState *env, target_ulong *pc,
+                          target_ulong *cs_base, uint32_t *flags);
 
 enum {
     QEMU_PSCI_CONDUIT_DISABLED = 0,
@@ -2860,6 +2761,33 @@ void arm_register_el_change_hook(ARMCPU *cpu, ARMELChangeHook *hook,
 static inline void *arm_get_el_change_hook_opaque(ARMCPU *cpu)
 {
     return cpu->el_change_hook_opaque;
+}
+
+/**
+ * aa32_vfp_dreg:
+ * Return a pointer to the Dn register within env in 32-bit mode.
+ */
+static inline uint64_t *aa32_vfp_dreg(CPUARMState *env, unsigned regno)
+{
+    return &env->vfp.regs[regno];
+}
+
+/**
+ * aa32_vfp_qreg:
+ * Return a pointer to the Qn register within env in 32-bit mode.
+ */
+static inline uint64_t *aa32_vfp_qreg(CPUARMState *env, unsigned regno)
+{
+    return &env->vfp.regs[2 * regno];
+}
+
+/**
+ * aa64_vfp_qreg:
+ * Return a pointer to the Qn register within env in 64-bit mode.
+ */
+static inline uint64_t *aa64_vfp_qreg(CPUARMState *env, unsigned regno)
+{
+    return &env->vfp.regs[2 * regno];
 }
 
 #endif

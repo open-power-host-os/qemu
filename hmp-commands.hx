@@ -666,39 +666,6 @@ Compute the checksum of a memory region.
 ETEXI
 
     {
-        .name       = "usb_add",
-        .args_type  = "devname:s",
-        .params     = "device",
-        .help       = "add USB device (e.g. 'host:bus.addr' or 'host:vendor_id:product_id')",
-        .cmd        = hmp_usb_add,
-    },
-
-STEXI
-@item usb_add @var{devname}
-@findex usb_add
-Add the USB device @var{devname}. This command is deprecated, please
-use @code{device_add} instead. For details of available devices see
-@ref{usb_devices}
-ETEXI
-
-    {
-        .name       = "usb_del",
-        .args_type  = "devname:s",
-        .params     = "device",
-        .help       = "remove USB device 'bus.addr'",
-        .cmd        = hmp_usb_del,
-    },
-
-STEXI
-@item usb_del @var{devname}
-@findex usb_del
-Remove the USB device @var{devname} from the QEMU virtual USB
-hub. @var{devname} has the syntax @code{bus.addr}. Use the monitor
-command @code{info usb} to see the devices you can remove. This
-command is deprecated, please use @code{device_del} instead.
-ETEXI
-
-    {
         .name       = "device_add",
         .args_type  = "device:O",
         .params     = "driver[,prop=value][,...]",
@@ -1586,17 +1553,35 @@ ETEXI
 
     {
         .name       = "nbd_server_add",
-        .args_type  = "writable:-w,device:B",
-        .params     = "nbd_server_add [-w] device",
+        .args_type  = "writable:-w,device:B,name:s?",
+        .params     = "nbd_server_add [-w] device [name]",
         .help       = "export a block device via NBD",
         .cmd        = hmp_nbd_server_add,
     },
 STEXI
-@item nbd_server_add @var{device}
+@item nbd_server_add @var{device} [ @var{name} ]
 @findex nbd_server_add
 Export a block device through QEMU's NBD server, which must be started
 beforehand with @command{nbd_server_start}.  The @option{-w} option makes the
-exported device writable too.
+exported device writable too.  The export name is controlled by @var{name},
+defaulting to @var{device}.
+ETEXI
+
+    {
+        .name       = "nbd_server_remove",
+        .args_type  = "force:-f,name:s",
+        .params     = "nbd_server_remove [-f] name",
+        .help       = "remove an export previously exposed via NBD",
+        .cmd        = hmp_nbd_server_remove,
+    },
+STEXI
+@item nbd_server_remove [-f] @var{name}
+@findex nbd_server_remove
+Stop exporting a block device through QEMU's NBD server, which was
+previously started with @command{nbd_server_add}.  The @option{-f}
+option forces the server to drop the export immediately even if
+clients are connected; otherwise the command fails unless there are no
+clients.
 ETEXI
 
     {
