@@ -15,6 +15,7 @@
 #include "boot-sector.h"
 #include "acpi-utils.h"
 #include "libqtest.h"
+#include "qapi/qmp/qdict.h"
 
 #define VGID_GUID "324e6eaf-d1d1-4bf6-bf41-b9bb6c91fb87"
 #define VMGENID_GUID_OFFSET 40   /* allow space for
@@ -44,7 +45,7 @@ static uint32_t acpi_find_vgia(void)
     int i;
 
     /* Wait for guest firmware to finish and start the payload. */
-    boot_sector_test();
+    boot_sector_test(global_qtest);
 
     /* Tables should be initialized now. */
     rsdp_offset = acpi_find_rsdp_address();

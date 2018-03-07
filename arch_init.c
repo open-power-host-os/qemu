@@ -28,9 +28,9 @@
 #include "sysemu/arch_init.h"
 #include "hw/pci/pci.h"
 #include "hw/audio/soundhw.h"
+#include "qapi/qapi-commands-misc.h"
 #include "qemu/config-file.h"
 #include "qemu/error-report.h"
-#include "qmp-commands.h"
 #include "hw/acpi/acpi.h"
 #include "qemu/help_option.h"
 
@@ -53,6 +53,8 @@ int graphic_depth = 32;
 #define QEMU_ARCH QEMU_ARCH_CRIS
 #elif defined(TARGET_I386)
 #define QEMU_ARCH QEMU_ARCH_I386
+#elif defined(TARGET_HPPA)
+#define QEMU_ARCH QEMU_ARCH_HPPA
 #elif defined(TARGET_M68K)
 #define QEMU_ARCH QEMU_ARCH_M68K
 #elif defined(TARGET_LM32)

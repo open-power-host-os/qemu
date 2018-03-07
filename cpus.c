@@ -22,12 +22,13 @@
  * THE SOFTWARE.
  */
 
-/* Needed early for CONFIG_BSD etc. */
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "qemu/config-file.h"
 #include "cpu.h"
 #include "monitor/monitor.h"
+#include "qapi/error.h"
+#include "qapi/qapi-commands-misc.h"
+#include "qapi/qapi-events-run-state.h"
 #include "qapi/qmp/qerror.h"
 #include "qemu/error-report.h"
 #include "sysemu/sysemu.h"
@@ -38,17 +39,17 @@
 #include "sysemu/kvm.h"
 #include "sysemu/hax.h"
 #include "sysemu/hvf.h"
-#include "qmp-commands.h"
+#include "sysemu/whpx.h"
 #include "exec/exec-all.h"
 
 #include "qemu/thread.h"
 #include "sysemu/cpus.h"
 #include "sysemu/qtest.h"
 #include "qemu/main-loop.h"
+#include "qemu/option.h"
 #include "qemu/bitmap.h"
 #include "qemu/seqlock.h"
 #include "tcg.h"
-#include "qapi-event.h"
 #include "hw/nmi.h"
 #include "sysemu/replay.h"
 #include "hw/boards.h"
@@ -259,7 +260,7 @@ int64_t cpu_get_icount_raw(void)
 
     if (cpu && cpu->running) {
         if (!cpu->can_do_io) {
-            fprintf(stderr, "Bad icount read\n");
+            error_report("Bad icount read");
             exit(1);
         }
         /* Take into account what has run */
@@ -1181,7 +1182,7 @@ static void *qemu_kvm_cpu_thread_fn(void *arg)
 
     r = kvm_init_vcpu(cpu);
     if (r < 0) {
-        fprintf(stderr, "kvm_init_vcpu failed: %s\n", strerror(-r));
+        error_report("kvm_init_vcpu failed: %s", strerror(-r));
         exit(1);
     }
 
@@ -1205,13 +1206,14 @@ static void *qemu_kvm_cpu_thread_fn(void *arg)
     cpu->created = false;
     qemu_cond_signal(&qemu_cpu_cond);
     qemu_mutex_unlock_iothread();
+    rcu_unregister_thread();
     return NULL;
 }
 
 static void *qemu_dummy_cpu_thread_fn(void *arg)
 {
 #ifdef _WIN32
-    fprintf(stderr, "qtest is not supported under Windows\n");
+    error_report("qtest is not supported under Windows");
     exit(1);
 #else
     CPUState *cpu = arg;
@@ -1233,7 +1235,7 @@ static void *qemu_dummy_cpu_thread_fn(void *arg)
     cpu->created = true;
     qemu_cond_signal(&qemu_cpu_cond);
 
-    while (1) {
+    do {
         qemu_mutex_unlock_iothread();
         do {
             int sig;
@@ -1245,8 +1247,9 @@ static void *qemu_dummy_cpu_thread_fn(void *arg)
         }
         qemu_mutex_lock_iothread();
         qemu_wait_io_event(cpu);
-    }
+    } while (!cpu->unplug);
 
+    rcu_unregister_thread();
     return NULL;
 #endif
 }
@@ -1380,11 +1383,9 @@ static void *qemu_tcg_rr_cpu_thread_fn(void *arg)
     qemu_mutex_lock_iothread();
     qemu_thread_get_self(cpu->thread);
 
-    CPU_FOREACH(cpu) {
-        cpu->thread_id = qemu_get_thread_id();
-        cpu->created = true;
-        cpu->can_do_io = 1;
-    }
+    cpu->thread_id = qemu_get_thread_id();
+    cpu->created = true;
+    cpu->can_do_io = 1;
     qemu_cond_signal(&qemu_cpu_cond);
 
     /* wait for initial kick-off after machine start */
@@ -1465,6 +1466,7 @@ static void *qemu_tcg_rr_cpu_thread_fn(void *arg)
         deal_with_unplugged_cpus();
     }
 
+    rcu_unregister_thread();
     return NULL;
 }
 
@@ -1473,6 +1475,7 @@ static void *qemu_hax_cpu_thread_fn(void *arg)
     CPUState *cpu = arg;
     int r;
 
+    rcu_register_thread();
     qemu_mutex_lock_iothread();
     qemu_thread_get_self(cpu->thread);
 
@@ -1484,7 +1487,7 @@ static void *qemu_hax_cpu_thread_fn(void *arg)
     hax_init_vcpu(cpu);
     qemu_cond_signal(&qemu_cpu_cond);
 
-    while (1) {
+    do {
         if (cpu_can_run(cpu)) {
             r = hax_smp_cpu_exec(cpu);
             if (r == EXCP_DEBUG) {
@@ -1493,7 +1496,8 @@ static void *qemu_hax_cpu_thread_fn(void *arg)
         }
 
         qemu_wait_io_event(cpu);
-    }
+    } while (!cpu->unplug || cpu_can_run(cpu));
+    rcu_unregister_thread();
     return NULL;
 }
 
@@ -1536,6 +1540,50 @@ static void *qemu_hvf_cpu_thread_fn(void *arg)
     cpu->created = false;
     qemu_cond_signal(&qemu_cpu_cond);
     qemu_mutex_unlock_iothread();
+    rcu_unregister_thread();
+    return NULL;
+}
+
+static void *qemu_whpx_cpu_thread_fn(void *arg)
+{
+    CPUState *cpu = arg;
+    int r;
+
+    rcu_register_thread();
+
+    qemu_mutex_lock_iothread();
+    qemu_thread_get_self(cpu->thread);
+    cpu->thread_id = qemu_get_thread_id();
+    current_cpu = cpu;
+
+    r = whpx_init_vcpu(cpu);
+    if (r < 0) {
+        fprintf(stderr, "whpx_init_vcpu failed: %s\n", strerror(-r));
+        exit(1);
+    }
+
+    /* signal CPU creation */
+    cpu->created = true;
+    qemu_cond_signal(&qemu_cpu_cond);
+
+    do {
+        if (cpu_can_run(cpu)) {
+            r = whpx_vcpu_exec(cpu);
+            if (r == EXCP_DEBUG) {
+                cpu_handle_guest_debug(cpu);
+            }
+        }
+        while (cpu_thread_is_idle(cpu)) {
+            qemu_cond_wait(cpu->halt_cond, &qemu_global_mutex);
+        }
+        qemu_wait_io_event_common(cpu);
+    } while (!cpu->unplug || cpu_can_run(cpu));
+
+    whpx_destroy_vcpu(cpu);
+    cpu->created = false;
+    qemu_cond_signal(&qemu_cpu_cond);
+    qemu_mutex_unlock_iothread();
+    rcu_unregister_thread();
     return NULL;
 }
 
@@ -1599,18 +1647,17 @@ static void *qemu_tcg_cpu_thread_fn(void *arg)
                 /* Ignore everything else? */
                 break;
             }
-        } else if (cpu->unplug) {
-            qemu_tcg_destroy_vcpu(cpu);
-            cpu->created = false;
-            qemu_cond_signal(&qemu_cpu_cond);
-            qemu_mutex_unlock_iothread();
-            return NULL;
         }
 
         atomic_mb_set(&cpu->exit_request, 0);
         qemu_wait_io_event(cpu);
-    }
+    } while (!cpu->unplug || cpu_can_run(cpu));
 
+    qemu_tcg_destroy_vcpu(cpu);
+    cpu->created = false;
+    qemu_cond_signal(&qemu_cpu_cond);
+    qemu_mutex_unlock_iothread();
+    rcu_unregister_thread();
     return NULL;
 }
 
@@ -1630,7 +1677,9 @@ static void qemu_cpu_kick_thread(CPUState *cpu)
     }
 #else /* _WIN32 */
     if (!qemu_cpu_is_self(cpu)) {
-        if (!QueueUserAPC(dummy_apc_func, cpu->hThread, 0)) {
+        if (whpx_enabled()) {
+            whpx_vcpu_kick(cpu);
+        } else if (!QueueUserAPC(dummy_apc_func, cpu->hThread, 0)) {
             fprintf(stderr, "%s: QueueUserAPC failed with error %lu\n",
                     __func__, GetLastError());
             exit(1);
@@ -1747,19 +1796,14 @@ void resume_all_vcpus(void)
     }
 }
 
-void cpu_remove(CPUState *cpu)
+void cpu_remove_sync(CPUState *cpu)
 {
     cpu->stop = true;
     cpu->unplug = true;
     qemu_cpu_kick(cpu);
-}
-
-void cpu_remove_sync(CPUState *cpu)
-{
-    cpu_remove(cpu);
-    while (cpu->created) {
-        qemu_cond_wait(&qemu_cpu_cond, &qemu_global_mutex);
-    }
+    qemu_mutex_unlock_iothread();
+    qemu_thread_join(cpu->thread);
+    qemu_mutex_lock_iothread();
 }
 
 /* For temporary buffers for forming a name */
@@ -1810,13 +1854,13 @@ static void qemu_tcg_init_vcpu(CPUState *cpu)
 #ifdef _WIN32
         cpu->hThread = qemu_thread_get_handle(cpu->thread);
 #endif
-        while (!cpu->created) {
-            qemu_cond_wait(&qemu_cpu_cond, &qemu_global_mutex);
-        }
     } else {
         /* For non-MTTCG cases we share the thread */
         cpu->thread = single_tcg_cpu_thread;
         cpu->halt_cond = single_tcg_halt_cond;
+        cpu->thread_id = first_cpu->thread_id;
+        cpu->can_do_io = 1;
+        cpu->created = true;
     }
 }
 
@@ -1835,9 +1879,6 @@ static void qemu_hax_start_vcpu(CPUState *cpu)
 #ifdef _WIN32
     cpu->hThread = qemu_thread_get_handle(cpu->thread);
 #endif
-    while (!cpu->created) {
-        qemu_cond_wait(&qemu_cpu_cond, &qemu_global_mutex);
-    }
 }
 
 static void qemu_kvm_start_vcpu(CPUState *cpu)
@@ -1851,9 +1892,6 @@ static void qemu_kvm_start_vcpu(CPUState *cpu)
              cpu->cpu_index);
     qemu_thread_create(cpu->thread, thread_name, qemu_kvm_cpu_thread_fn,
                        cpu, QEMU_THREAD_JOINABLE);
-    while (!cpu->created) {
-        qemu_cond_wait(&qemu_cpu_cond, &qemu_global_mutex);
-    }
 }
 
 static void qemu_hvf_start_vcpu(CPUState *cpu)
@@ -1872,9 +1910,22 @@ static void qemu_hvf_start_vcpu(CPUState *cpu)
              cpu->cpu_index);
     qemu_thread_create(cpu->thread, thread_name, qemu_hvf_cpu_thread_fn,
                        cpu, QEMU_THREAD_JOINABLE);
-    while (!cpu->created) {
-        qemu_cond_wait(&qemu_cpu_cond, &qemu_global_mutex);
-    }
+}
+
+static void qemu_whpx_start_vcpu(CPUState *cpu)
+{
+    char thread_name[VCPU_THREAD_NAME_SIZE];
+
+    cpu->thread = g_malloc0(sizeof(QemuThread));
+    cpu->halt_cond = g_malloc0(sizeof(QemuCond));
+    qemu_cond_init(cpu->halt_cond);
+    snprintf(thread_name, VCPU_THREAD_NAME_SIZE, "CPU %d/WHPX",
+             cpu->cpu_index);
+    qemu_thread_create(cpu->thread, thread_name, qemu_whpx_cpu_thread_fn,
+                       cpu, QEMU_THREAD_JOINABLE);
+#ifdef _WIN32
+    cpu->hThread = qemu_thread_get_handle(cpu->thread);
+#endif
 }
 
 static void qemu_dummy_start_vcpu(CPUState *cpu)
@@ -1888,9 +1939,6 @@ static void qemu_dummy_start_vcpu(CPUState *cpu)
              cpu->cpu_index);
     qemu_thread_create(cpu->thread, thread_name, qemu_dummy_cpu_thread_fn, cpu,
                        QEMU_THREAD_JOINABLE);
-    while (!cpu->created) {
-        qemu_cond_wait(&qemu_cpu_cond, &qemu_global_mutex);
-    }
 }
 
 void qemu_init_vcpu(CPUState *cpu)
@@ -1915,8 +1963,14 @@ void qemu_init_vcpu(CPUState *cpu)
         qemu_hvf_start_vcpu(cpu);
     } else if (tcg_enabled()) {
         qemu_tcg_init_vcpu(cpu);
+    } else if (whpx_enabled()) {
+        qemu_whpx_start_vcpu(cpu);
     } else {
         qemu_dummy_start_vcpu(cpu);
+    }
+
+    while (!cpu->created) {
+        qemu_cond_wait(&qemu_cpu_cond, &qemu_global_mutex);
     }
 }
 
@@ -2033,6 +2087,9 @@ CpuInfoList *qmp_query_cpus(Error **errp)
 #elif defined(TARGET_TRICORE)
         TriCoreCPU *tricore_cpu = TRICORE_CPU(cpu);
         CPUTriCoreState *env = &tricore_cpu->env;
+#elif defined(TARGET_S390X)
+        S390CPU *s390_cpu = S390_CPU(cpu);
+        CPUS390XState *env = &s390_cpu->env;
 #endif
 
         cpu_synchronize_state(cpu);
@@ -2060,6 +2117,9 @@ CpuInfoList *qmp_query_cpus(Error **errp)
 #elif defined(TARGET_TRICORE)
         info->value->arch = CPU_INFO_ARCH_TRICORE;
         info->value->u.tricore.PC = env->PC;
+#elif defined(TARGET_S390X)
+        info->value->arch = CPU_INFO_ARCH_S390;
+        info->value->u.s390.cpu_state = env->cpu_state;
 #else
         info->value->arch = CPU_INFO_ARCH_OTHER;
 #endif
@@ -2072,6 +2132,54 @@ CpuInfoList *qmp_query_cpus(Error **errp)
         }
 
         /* XXX: waiting for the qapi to support GSList */
+        if (!cur_item) {
+            head = cur_item = info;
+        } else {
+            cur_item->next = info;
+            cur_item = info;
+        }
+    }
+
+    return head;
+}
+
+/*
+ * fast means: we NEVER interrupt vCPU threads to retrieve
+ * information from KVM.
+ */
+CpuInfoFastList *qmp_query_cpus_fast(Error **errp)
+{
+    MachineState *ms = MACHINE(qdev_get_machine());
+    MachineClass *mc = MACHINE_GET_CLASS(ms);
+    CpuInfoFastList *head = NULL, *cur_item = NULL;
+    CPUState *cpu;
+#if defined(TARGET_S390X)
+    S390CPU *s390_cpu;
+    CPUS390XState *env;
+#endif
+
+    CPU_FOREACH(cpu) {
+        CpuInfoFastList *info = g_malloc0(sizeof(*info));
+        info->value = g_malloc0(sizeof(*info->value));
+
+        info->value->cpu_index = cpu->cpu_index;
+        info->value->qom_path = object_get_canonical_path(OBJECT(cpu));
+        info->value->thread_id = cpu->thread_id;
+
+        info->value->has_props = !!mc->cpu_index_to_instance_props;
+        if (info->value->has_props) {
+            CpuInstanceProperties *props;
+            props = g_malloc0(sizeof(*props));
+            *props = mc->cpu_index_to_instance_props(ms, cpu->cpu_index);
+            info->value->props = props;
+        }
+
+#if defined(TARGET_S390X)
+        s390_cpu = S390_CPU(cpu);
+        env = &s390_cpu->env;
+        info->value->arch = CPU_INFO_ARCH_S390;
+        info->value->u.s390.cpu_state = env->cpu_state;
+#endif
         if (!cur_item) {
             head = cur_item = info;
         } else {

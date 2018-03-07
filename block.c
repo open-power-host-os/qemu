@@ -21,6 +21,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
 #include "block/trace.h"
 #include "block/block_int.h"
@@ -29,17 +30,17 @@
 #include "qemu/error-report.h"
 #include "module_block.h"
 #include "qemu/module.h"
-#include "qapi/qmp/qerror.h"
-#include "qapi/qmp/qbool.h"
+#include "qapi/error.h"
+#include "qapi/qmp/qdict.h"
 #include "qapi/qmp/qjson.h"
+#include "qapi/qmp/qstring.h"
 #include "sysemu/block-backend.h"
 #include "sysemu/sysemu.h"
 #include "qemu/notify.h"
+#include "qemu/option.h"
 #include "qemu/coroutine.h"
 #include "block/qapi.h"
-#include "qmp-commands.h"
 #include "qemu/timer.h"
-#include "qapi-event.h"
 #include "qemu/cutils.h"
 #include "qemu/id.h"
 
@@ -417,7 +418,7 @@ static void coroutine_fn bdrv_create_co_entry(void *opaque)
     CreateCo *cco = opaque;
     assert(cco->drv);
 
-    ret = cco->drv->bdrv_create(cco->filename, cco->opts, &local_err);
+    ret = cco->drv->bdrv_co_create_opts(cco->filename, cco->opts, &local_err);
     error_propagate(&cco->err, local_err);
     cco->ret = ret;
 }
@@ -436,7 +437,7 @@ int bdrv_create(BlockDriver *drv, const char* filename,
         .err = NULL,
     };
 
-    if (!drv->bdrv_create) {
+    if (!drv->bdrv_co_create_opts) {
         error_setg(errp, "Driver '%s' does not support image creation", drv->format_name);
         ret = -ENOTSUP;
         goto out;
@@ -4007,17 +4008,11 @@ bool bdrv_unallocated_blocks_are_zero(BlockDriverState *bs)
 
 bool bdrv_can_write_zeroes_with_unmap(BlockDriverState *bs)
 {
-    BlockDriverInfo bdi;
-
     if (!(bs->open_flags & BDRV_O_UNMAP)) {
         return false;
     }
 
-    if (bdrv_get_info(bs, &bdi) == 0) {
-        return bdi.can_write_zeroes_with_unmap;
-    }
-
-    return false;
+    return bs->supported_zero_flags & BDRV_REQ_MAY_UNMAP;
 }
 
 const char *bdrv_get_encrypted_filename(BlockDriverState *bs)
@@ -4716,7 +4711,12 @@ out:
 
 AioContext *bdrv_get_aio_context(BlockDriverState *bs)
 {
-    return bs->aio_context;
+    return bs ? bs->aio_context : qemu_get_aio_context();
+}
+
+AioWait *bdrv_get_aio_wait(BlockDriverState *bs)
+{
+    return bs ? &bs->wait : NULL;
 }
 
 void bdrv_coroutine_enter(BlockDriverState *bs, Coroutine *co)

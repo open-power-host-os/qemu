@@ -28,14 +28,15 @@
 #include "qemu/osdep.h"
 #include "hw/qdev.h"
 #include "sysemu/sysemu.h"
+#include "qapi/error.h"
+#include "qapi/qapi-events-misc.h"
 #include "qapi/qmp/qerror.h"
 #include "qapi/visitor.h"
-#include "qapi/qmp/qjson.h"
 #include "qemu/error-report.h"
+#include "qemu/option.h"
 #include "hw/hotplug.h"
 #include "hw/boards.h"
 #include "hw/sysbus.h"
-#include "qapi-event.h"
 
 bool qdev_hotplug = false;
 static bool qdev_hot_added = false;
@@ -384,15 +385,17 @@ static NamedGPIOList *qdev_get_named_gpio_list(DeviceState *dev,
     return ngl;
 }
 
-void qdev_init_gpio_in_named(DeviceState *dev, qemu_irq_handler handler,
-                             const char *name, int n)
+void qdev_init_gpio_in_named_with_opaque(DeviceState *dev,
+                                         qemu_irq_handler handler,
+                                         void *opaque,
+                                         const char *name, int n)
 {
     int i;
     NamedGPIOList *gpio_list = qdev_get_named_gpio_list(dev, name);
 
     assert(gpio_list->num_out == 0 || !name);
     gpio_list->in = qemu_extend_irqs(gpio_list->in, gpio_list->num_in, handler,
-                                     dev, n);
+                                     opaque, n);
 
     if (!name) {
         name = "unnamed-gpio-in";
@@ -1073,6 +1076,30 @@ static void device_class_init(ObjectClass *class, void *data)
      */
     dc->hotpluggable = true;
     dc->user_creatable = true;
+}
+
+void device_class_set_parent_reset(DeviceClass *dc,
+                                   DeviceReset dev_reset,
+                                   DeviceReset *parent_reset)
+{
+    *parent_reset = dc->reset;
+    dc->reset = dev_reset;
+}
+
+void device_class_set_parent_realize(DeviceClass *dc,
+                                     DeviceRealize dev_realize,
+                                     DeviceRealize *parent_realize)
+{
+    *parent_realize = dc->realize;
+    dc->realize = dev_realize;
+}
+
+void device_class_set_parent_unrealize(DeviceClass *dc,
+                                       DeviceUnrealize dev_unrealize,
+                                       DeviceUnrealize *parent_unrealize)
+{
+    *parent_unrealize = dc->unrealize;
+    dc->unrealize = dev_unrealize;
 }
 
 void device_reset(DeviceState *dev)

@@ -31,7 +31,8 @@
 #include "ui/console.h"
 #include "ui/input.h"
 #include "sysemu/sysemu.h"
-#include "qmp-commands.h"
+#include "qapi/error.h"
+#include "qapi/qapi-commands.h"
 #include "sysemu/blockdev.h"
 #include "qemu-version.h"
 #include <Carbon/Carbon.h>
@@ -1682,12 +1683,12 @@ static void addRemovableDevicesMenuItems(void)
     qapi_free_BlockInfoList(pointerToFree);
 }
 
-void cocoa_display_init(DisplayState *ds, int full_screen)
+static void cocoa_display_init(DisplayState *ds, DisplayOptions *opts)
 {
     COCOA_DEBUG("qemu_cocoa: cocoa_display_init\n");
 
     /* if fullscreen mode is to be used */
-    if (full_screen == true) {
+    if (opts->has_full_screen && opts->full_screen) {
         [NSApp activateIgnoringOtherApps: YES];
         [(QemuCocoaAppController *)[[NSApplication sharedApplication] delegate] toggleFullScreen: nil];
     }
@@ -1712,3 +1713,15 @@ void cocoa_display_init(DisplayState *ds, int full_screen)
      */
     addRemovableDevicesMenuItems();
 }
+
+static QemuDisplay qemu_display_cocoa = {
+    .type       = DISPLAY_TYPE_COCOA,
+    .init       = cocoa_display_init,
+};
+
+static void register_cocoa(void)
+{
+    qemu_display_register(&qemu_display_cocoa);
+}
+
+type_init(register_cocoa);

@@ -25,10 +25,10 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include <zlib.h>
-#include "qapi-event.h"
 #include "qemu/cutils.h"
 #include "qemu/bitops.h"
 #include "qemu/bitmap.h"
@@ -42,6 +42,8 @@
 #include "postcopy-ram.h"
 #include "migration/page_cache.h"
 #include "qemu/error-report.h"
+#include "qapi/error.h"
+#include "qapi/qapi-events-migration.h"
 #include "qapi/qmp/qerror.h"
 #include "trace.h"
 #include "exec/ram_addr.h"
@@ -907,11 +909,10 @@ static void migration_bitmap_sync(RAMState *rs)
  * @rs: current RAM state
  * @block: block that contains the page we want to send
  * @offset: offset inside the block for the page
- * @p: pointer to the page
  */
-static int save_zero_page(RAMState *rs, RAMBlock *block, ram_addr_t offset,
-                          uint8_t *p)
+static int save_zero_page(RAMState *rs, RAMBlock *block, ram_addr_t offset)
 {
+    uint8_t *p = block->host + offset;
     int pages = -1;
 
     if (is_zero_range(p, TARGET_PAGE_SIZE)) {
@@ -984,7 +985,7 @@ static int ram_save_page(RAMState *rs, PageSearchStatus *pss, bool last_stage)
             }
         }
     } else {
-        pages = save_zero_page(rs, block, offset, p);
+        pages = save_zero_page(rs, block, offset);
         if (pages > 0) {
             /* Must let xbzrle know, otherwise a previous (now 0'd) cached
              * page would be stale
@@ -1160,7 +1161,7 @@ static int ram_save_compressed_page(RAMState *rs, PageSearchStatus *pss,
          */
         if (block != rs->last_sent_block) {
             flush_compressed_data(rs);
-            pages = save_zero_page(rs, block, offset, p);
+            pages = save_zero_page(rs, block, offset);
             if (pages == -1) {
                 /* Make sure the first page is sent out before other pages */
                 bytes_xmit = save_page_header(rs, rs->f, block, offset |
@@ -1180,7 +1181,7 @@ static int ram_save_compressed_page(RAMState *rs, PageSearchStatus *pss,
                 ram_release_pages(block->idstr, offset, pages);
             }
         } else {
-            pages = save_zero_page(rs, block, offset, p);
+            pages = save_zero_page(rs, block, offset);
             if (pages == -1) {
                 pages = compress_page_with_multi_thread(rs, block, offset);
             } else {
@@ -1601,11 +1602,13 @@ static void xbzrle_load_cleanup(void)
 
 static void ram_state_cleanup(RAMState **rsp)
 {
-    migration_page_queue_free(*rsp);
-    qemu_mutex_destroy(&(*rsp)->bitmap_mutex);
-    qemu_mutex_destroy(&(*rsp)->src_page_req_mutex);
-    g_free(*rsp);
-    *rsp = NULL;
+    if (*rsp) {
+        migration_page_queue_free(*rsp);
+        qemu_mutex_destroy(&(*rsp)->bitmap_mutex);
+        qemu_mutex_destroy(&(*rsp)->src_page_req_mutex);
+        g_free(*rsp);
+        *rsp = NULL;
+    }
 }
 
 static void xbzrle_cleanup(void)
@@ -2697,6 +2700,16 @@ static int ram_load_postcopy(QEMUFile *f)
         uint8_t ch;
 
         addr = qemu_get_be64(f);
+
+        /*
+         * If qemu file error, we should stop here, and then "addr"
+         * may be invalid
+         */
+        ret = qemu_file_get_error(f);
+        if (ret) {
+            break;
+        }
+
         flags = addr & ~TARGET_PAGE_MASK;
         addr &= TARGET_PAGE_MASK;
 
@@ -2777,9 +2790,15 @@ static int ram_load_postcopy(QEMUFile *f)
             error_report("Unknown combination of migration flags: %#x"
                          " (postcopy mode)", flags);
             ret = -EINVAL;
+            break;
         }
 
-        if (place_needed) {
+        /* Detect for any possible file errors */
+        if (!ret && qemu_file_get_error(f)) {
+            ret = qemu_file_get_error(f);
+        }
+
+        if (!ret && place_needed) {
             /* This gets called at the last target page in the host page */
             void *place_dest = host + TARGET_PAGE_SIZE - block->page_size;
 
@@ -2790,9 +2809,6 @@ static int ram_load_postcopy(QEMUFile *f)
                 ret = postcopy_place_page(mis, place_dest,
                                           place_source, block);
             }
-        }
-        if (!ret) {
-            ret = qemu_file_get_error(f);
         }
     }
 

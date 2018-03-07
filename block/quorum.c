@@ -15,14 +15,14 @@
 
 #include "qemu/osdep.h"
 #include "qemu/cutils.h"
+#include "qemu/option.h"
 #include "block/block_int.h"
-#include "qapi/qmp/qbool.h"
+#include "qapi/error.h"
+#include "qapi/qapi-events-block.h"
 #include "qapi/qmp/qdict.h"
 #include "qapi/qmp/qerror.h"
-#include "qapi/qmp/qjson.h"
 #include "qapi/qmp/qlist.h"
 #include "qapi/qmp/qstring.h"
-#include "qapi-event.h"
 #include "crypto/hash.h"
 
 #define HASH_LENGTH 32

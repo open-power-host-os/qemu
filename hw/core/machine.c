@@ -13,7 +13,7 @@
 #include "qemu/osdep.h"
 #include "hw/boards.h"
 #include "qapi/error.h"
-#include "qapi-visit.h"
+#include "qapi/qapi-visit-common.h"
 #include "qapi/visitor.h"
 #include "hw/sysbus.h"
 #include "sysemu/sysemu.h"
@@ -520,7 +520,7 @@ static void machine_class_init(ObjectClass *oc, void *data)
     object_class_property_set_description(oc, "accel",
         "Accelerator list", &error_abort);
 
-    object_class_property_add(oc, "kernel-irqchip", "OnOffSplit",
+    object_class_property_add(oc, "kernel-irqchip", "on|off|split",
         NULL, machine_set_kernel_irqchip,
         NULL, NULL, &error_abort);
     object_class_property_set_description(oc, "kernel-irqchip",

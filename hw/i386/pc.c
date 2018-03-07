@@ -21,6 +21,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/i386/pc.h"
@@ -58,14 +59,16 @@
 #include "qemu/bitmap.h"
 #include "qemu/config-file.h"
 #include "qemu/error-report.h"
+#include "qemu/option.h"
 #include "hw/acpi/acpi.h"
 #include "hw/acpi/cpu_hotplug.h"
 #include "hw/boards.h"
 #include "hw/pci/pci_host.h"
 #include "acpi-build.h"
 #include "hw/mem/pc-dimm.h"
+#include "qapi/error.h"
+#include "qapi/qapi-visit-common.h"
 #include "qapi/visitor.h"
-#include "qapi-visit.h"
 #include "qom/cpu.h"
 #include "hw/nmi.h"
 #include "hw/i386/intel_iommu.h"
@@ -1631,23 +1634,6 @@ void pc_nic_init(ISABus *isa_bus, PCIBus *pci_bus)
         }
     }
     rom_reset_order_override();
-}
-
-void pc_pci_device_init(PCIBus *pci_bus)
-{
-    int max_bus;
-    int bus;
-
-    /* Note: if=scsi is deprecated with PC machine types */
-    max_bus = drive_get_max_bus(IF_SCSI);
-    for (bus = 0; bus <= max_bus; bus++) {
-        pci_create_simple(pci_bus, -1, "lsi53c895a");
-        /*
-         * By not creating frontends here, we make
-         * scsi_legacy_handle_cmdline() create them, and warn that
-         * this usage is deprecated.
-         */
-    }
 }
 
 void ioapic_init_gsi(GSIState *gsi_state, const char *parent_name)

@@ -36,6 +36,8 @@
 
 #include "qemu/osdep.h"
 #include "qemu-common.h"
+#include "qapi/error.h"
+#include "qapi/qapi-commands-misc.h"
 #include "qemu/cutils.h"
 
 #include "ui/console.h"
@@ -51,7 +53,6 @@
 #include "trace.h"
 #include "ui/input.h"
 #include "sysemu/sysemu.h"
-#include "qmp-commands.h"
 #include "keymaps.h"
 #include "chardev/char.h"
 #include "qom/object.h"
@@ -229,6 +230,8 @@ struct GtkDisplayState {
 
     bool modifier_pressed[ARRAY_SIZE(modifier_keycode)];
     bool ignore_keys;
+
+    DisplayOptions *opts;
 };
 
 typedef struct VCChardev {
@@ -777,9 +780,14 @@ static gboolean gd_window_close(GtkWidget *widget, GdkEvent *event,
                                 void *opaque)
 {
     GtkDisplayState *s = opaque;
+    bool allow_close = true;
     int i;
 
-    if (!no_quit) {
+    if (s->opts->has_window_close && !s->opts->window_close) {
+        allow_close = false;
+    }
+
+    if (allow_close) {
         for (i = 0; i < s->nb_vcs; i++) {
             if (s->vc[i].type != GD_VC_GFX) {
                 continue;
@@ -1944,8 +1952,8 @@ static GSList *gd_vc_vte_init(GtkDisplayState *s, VirtualConsole *vc,
     scrollbar = gtk_vscrollbar_new(vadjustment);
 #endif
 
-    gtk_box_pack_start(GTK_BOX(box), vc->vte.terminal, TRUE, TRUE, 0);
-    gtk_box_pack_start(GTK_BOX(box), scrollbar, FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(box), scrollbar, FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(box), vc->vte.terminal, TRUE, TRUE, 0);
 
     vc->vte.box = box;
     vc->vte.scrollbar = scrollbar;
@@ -2289,7 +2297,7 @@ static void gd_create_menus(GtkDisplayState *s)
 
 static gboolean gtkinit;
 
-void gtk_display_init(DisplayState *ds, bool full_screen, bool grab_on_hover)
+static void gtk_display_init(DisplayState *ds, DisplayOptions *opts)
 {
     VirtualConsole *vc;
 
@@ -2301,6 +2309,8 @@ void gtk_display_init(DisplayState *ds, bool full_screen, bool grab_on_hover)
         fprintf(stderr, "gtk initialization failed\n");
         exit(1);
     }
+    assert(opts->type == DISPLAY_TYPE_GTK);
+    s->opts = opts;
 
 #if !GTK_CHECK_VERSION(3, 0, 0)
     g_printerr("Running QEMU with GTK 2.x is deprecated, and will be removed\n"
@@ -2387,15 +2397,17 @@ void gtk_display_init(DisplayState *ds, bool full_screen, bool grab_on_hover)
                              vc && vc->type == GD_VC_VTE);
 #endif
 
-    if (full_screen) {
+    if (opts->has_full_screen &&
+        opts->full_screen) {
         gtk_menu_item_activate(GTK_MENU_ITEM(s->full_screen_item));
     }
-    if (grab_on_hover) {
+    if (opts->u.gtk.has_grab_on_hover &&
+        opts->u.gtk.grab_on_hover) {
         gtk_menu_item_activate(GTK_MENU_ITEM(s->grab_on_hover_item));
     }
 }
 
-void early_gtk_display_init(int opengl)
+static void early_gtk_display_init(DisplayOptions *opts)
 {
     /* The QEMU code relies on the assumption that it's always run in
      * the C locale. Therefore it is not prepared to deal with
@@ -2421,11 +2433,8 @@ void early_gtk_display_init(int opengl)
         return;
     }
 
-    switch (opengl) {
-    case -1: /* default */
-    case 0:  /* off */
-        break;
-    case 1: /* on */
+    assert(opts->type == DISPLAY_TYPE_GTK);
+    if (opts->has_gl && opts->gl) {
 #if defined(CONFIG_OPENGL)
 #if defined(CONFIG_GTK_GL)
         gtk_gl_area_init();
@@ -2433,10 +2442,6 @@ void early_gtk_display_init(int opengl)
         gtk_egl_init();
 #endif
 #endif
-        break;
-    default:
-        g_assert_not_reached();
-        break;
     }
 
     keycode_map = gd_get_keymap(&keycode_maplen);
@@ -2445,3 +2450,16 @@ void early_gtk_display_init(int opengl)
     type_register(&char_gd_vc_type_info);
 #endif
 }
+
+static QemuDisplay qemu_display_gtk = {
+    .type       = DISPLAY_TYPE_GTK,
+    .early_init = early_gtk_display_init,
+    .init       = gtk_display_init,
+};
+
+static void register_gtk(void)
+{
+    qemu_display_register(&qemu_display_gtk);
+}
+
+type_init(register_gtk);

@@ -25,19 +25,19 @@
 #include "qemu/osdep.h"
 
 #include <poll.h>
-#include "qemu-common.h"
 #include "qemu/config-file.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "block/block_int.h"
 #include "trace.h"
 #include "qemu/iov.h"
+#include "qemu/option.h"
 #include "qemu/uri.h"
 #include "qemu/cutils.h"
 #include "sysemu/sysemu.h"
+#include "qapi/qapi-visit-block-core.h"
 #include "qapi/qmp/qdict.h"
 #include "qapi/qmp/qstring.h"
-#include "qapi-visit.h"
 #include "qapi/qobject-input-visitor.h"
 #include "qapi/qobject-output-visitor.h"
 #include <nfsc/libnfs.h>
@@ -684,7 +684,8 @@ static QemuOptsList nfs_create_opts = {
     }
 };
 
-static int nfs_file_create(const char *url, QemuOpts *opts, Error **errp)
+static int coroutine_fn nfs_file_co_create_opts(const char *url, QemuOpts *opts,
+                                                Error **errp)
 {
     int64_t ret, total_size;
     NFSClient *client = g_new0(NFSClient, 1);
@@ -897,7 +898,7 @@ static BlockDriver bdrv_nfs = {
 
     .bdrv_file_open                 = nfs_file_open,
     .bdrv_close                     = nfs_file_close,
-    .bdrv_create                    = nfs_file_create,
+    .bdrv_co_create_opts            = nfs_file_co_create_opts,
     .bdrv_reopen_prepare            = nfs_reopen_prepare,
 
     .bdrv_co_preadv                 = nfs_co_preadv,

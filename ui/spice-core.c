@@ -21,7 +21,6 @@
 #include <netdb.h>
 #include "sysemu/sysemu.h"
 
-#include "qemu-common.h"
 #include "ui/qemu-spice.h"
 #include "qemu/error-report.h"
 #include "qemu/thread.h"
@@ -29,15 +28,14 @@
 #include "qemu/queue.h"
 #include "qemu-x509.h"
 #include "qemu/sockets.h"
-#include "qmp-commands.h"
-#include "qapi/qmp/qbool.h"
-#include "qapi/qmp/qstring.h"
-#include "qapi/qmp/qjson.h"
+#include "qapi/error.h"
+#include "qapi/qapi-commands-ui.h"
+#include "qapi/qapi-events-ui.h"
 #include "qemu/notify.h"
+#include "qemu/option.h"
 #include "migration/misc.h"
 #include "hw/hw.h"
 #include "ui/spice-display.h"
-#include "qapi-event.h"
 
 /* core bits */
 

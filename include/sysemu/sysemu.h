@@ -2,10 +2,9 @@
 #define SYSEMU_H
 /* Misc. things related to the system emulator.  */
 
-#include "qemu/option.h"
+#include "qapi/qapi-types-run-state.h"
 #include "qemu/queue.h"
 #include "qemu/timer.h"
-#include "qapi-types.h"
 #include "qemu/notify.h"
 #include "qemu/main-loop.h"
 #include "qemu/bitmap.h"
@@ -199,6 +198,7 @@ extern QemuOptsList bdrv_runtime_opts;
 extern QemuOptsList qemu_chardev_opts;
 extern QemuOptsList qemu_device_opts;
 extern QemuOptsList qemu_netdev_opts;
+extern QemuOptsList qemu_nic_opts;
 extern QemuOptsList qemu_net_opts;
 extern QemuOptsList qemu_global_opts;
 extern QemuOptsList qemu_mon_opts;

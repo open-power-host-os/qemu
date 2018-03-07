@@ -24,9 +24,11 @@
 #include "sysemu/block-backend.h"
 #include "crypto/block.h"
 #include "qapi/opts-visitor.h"
+#include "qapi/qapi-visit-crypto.h"
+#include "qapi/qmp/qdict.h"
 #include "qapi/qobject-input-visitor.h"
-#include "qapi-visit.h"
 #include "qapi/error.h"
+#include "qemu/option.h"
 #include "block/crypto.h"
 
 typedef struct BlockCrypto BlockCrypto;
@@ -554,9 +556,9 @@ static int block_crypto_open_luks(BlockDriverState *bs,
                                      bs, options, flags, errp);
 }
 
-static int block_crypto_create_luks(const char *filename,
-                                    QemuOpts *opts,
-                                    Error **errp)
+static int coroutine_fn block_crypto_co_create_opts_luks(const char *filename,
+                                                         QemuOpts *opts,
+                                                         Error **errp)
 {
     return block_crypto_create_generic(Q_CRYPTO_BLOCK_FORMAT_LUKS,
                                        filename, opts, errp);
@@ -574,7 +576,6 @@ static int block_crypto_get_info_luks(BlockDriverState *bs,
     }
 
     bdi->unallocated_blocks_are_zero = false;
-    bdi->can_write_zeroes_with_unmap = false;
     bdi->cluster_size = subbdi.cluster_size;
 
     return 0;
@@ -616,7 +617,7 @@ BlockDriver bdrv_crypto_luks = {
     .bdrv_open          = block_crypto_open_luks,
     .bdrv_close         = block_crypto_close,
     .bdrv_child_perm    = bdrv_format_default_perms,
-    .bdrv_create        = block_crypto_create_luks,
+    .bdrv_co_create_opts = block_crypto_co_create_opts_luks,
     .bdrv_truncate      = block_crypto_truncate,
     .create_opts        = &block_crypto_create_opts_luks,
 

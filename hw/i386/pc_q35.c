@@ -27,6 +27,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/loader.h"
@@ -48,6 +49,7 @@
 #include "hw/ide/pci.h"
 #include "hw/ide/ahci.h"
 #include "hw/usb.h"
+#include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "sysemu/numa.h"
 
@@ -271,9 +273,6 @@ static void pc_q35_init(MachineState *machine)
     /* the rest devices to which pci devfn is automatically assigned */
     pc_vga_init(isa_bus, host_bus);
     pc_nic_init(isa_bus, host_bus);
-    if (pcmc->pci_enabled) {
-        pc_pci_device_init(host_bus);
-    }
 
     if (pcms->acpi_nvdimm_state.is_enabled) {
         nvdimm_init_acpi_state(&pcms->acpi_nvdimm_state, system_io,

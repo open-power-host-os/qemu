@@ -22,6 +22,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/pci/pci.h"
@@ -33,6 +34,7 @@
 #include "sysemu/dma.h"
 #include "hw/block/block.h"
 #include "sysemu/block-backend.h"
+#include "qapi/error.h"
 #include "qemu/cutils.h"
 
 #include "hw/ide/internal.h"
@@ -1085,15 +1087,7 @@ static void ide_flush_cache(IDEState *s)
     s->status |= BUSY_STAT;
     ide_set_retry(s);
     block_acct_start(blk_get_stats(s->blk), &s->acct, 0, BLOCK_ACCT_FLUSH);
-
-    if (blk_bs(s->blk)) {
-        s->pio_aiocb = blk_aio_flush(s->blk, ide_flush_cb, s);
-    } else {
-        /* XXX blk_aio_flush() crashes when blk_bs(blk) is NULL, remove this
-         * temporary workaround when blk_aio_*() functions handle NULL blk_bs.
-         */
-        ide_flush_cb(s, 0);
-    }
+    s->pio_aiocb = blk_aio_flush(s->blk, ide_flush_cb, s);
 }
 
 static void ide_cfata_metadata_inquiry(IDEState *s)

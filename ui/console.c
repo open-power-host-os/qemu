@@ -21,12 +21,14 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "ui/console.h"
 #include "hw/qdev-core.h"
+#include "qapi/error.h"
+#include "qapi/qapi-commands-ui.h"
+#include "qemu/option.h"
 #include "qemu/timer.h"
-#include "qmp-commands.h"
 #include "chardev/char-fe.h"
 #include "trace.h"
 #include "exec/memory.h"
@@ -1758,14 +1760,24 @@ void dpy_gl_scanout_dmabuf(QemuConsole *con,
     con->gl->ops->dpy_gl_scanout_dmabuf(con->gl, dmabuf);
 }
 
-void dpy_gl_cursor_dmabuf(QemuConsole *con,
-                          QemuDmaBuf *dmabuf,
-                          uint32_t pos_x, uint32_t pos_y)
+void dpy_gl_cursor_dmabuf(QemuConsole *con, QemuDmaBuf *dmabuf,
+                          bool have_hot, uint32_t hot_x, uint32_t hot_y)
 {
     assert(con->gl);
 
     if (con->gl->ops->dpy_gl_cursor_dmabuf) {
-        con->gl->ops->dpy_gl_cursor_dmabuf(con->gl, dmabuf, pos_x, pos_y);
+        con->gl->ops->dpy_gl_cursor_dmabuf(con->gl, dmabuf,
+                                           have_hot, hot_x, hot_y);
+    }
+}
+
+void dpy_gl_cursor_position(QemuConsole *con,
+                            uint32_t pos_x, uint32_t pos_y)
+{
+    assert(con->gl);
+
+    if (con->gl->ops->dpy_gl_cursor_position) {
+        con->gl->ops->dpy_gl_cursor_position(con->gl, pos_x, pos_y);
     }
 }
 
@@ -2166,6 +2178,65 @@ PixelFormat qemu_default_pixelformat(int bpp)
     pixman_format_code_t fmt = qemu_default_pixman_format(bpp, true);
     PixelFormat pf = qemu_pixelformat_from_pixman(fmt);
     return pf;
+}
+
+static QemuDisplay *dpys[DISPLAY_TYPE__MAX];
+
+void qemu_display_register(QemuDisplay *ui)
+{
+    assert(ui->type < DISPLAY_TYPE__MAX);
+    dpys[ui->type] = ui;
+}
+
+bool qemu_display_find_default(DisplayOptions *opts)
+{
+    static DisplayType prio[] = {
+        DISPLAY_TYPE_GTK,
+        DISPLAY_TYPE_SDL,
+        DISPLAY_TYPE_COCOA
+    };
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(prio); i++) {
+        if (dpys[prio[i]] == NULL) {
+            ui_module_load_one(DisplayType_lookup.array[prio[i]]);
+        }
+        if (dpys[prio[i]] == NULL) {
+            continue;
+        }
+        opts->type = prio[i];
+        return true;
+    }
+    return false;
+}
+
+void qemu_display_early_init(DisplayOptions *opts)
+{
+    assert(opts->type < DISPLAY_TYPE__MAX);
+    if (opts->type == DISPLAY_TYPE_NONE) {
+        return;
+    }
+    if (dpys[opts->type] == NULL) {
+        ui_module_load_one(DisplayType_lookup.array[opts->type]);
+    }
+    if (dpys[opts->type] == NULL) {
+        error_report("Display '%s' is not available.",
+                     DisplayType_lookup.array[opts->type]);
+        exit(1);
+    }
+    if (dpys[opts->type]->early_init) {
+        dpys[opts->type]->early_init(opts);
+    }
+}
+
+void qemu_display_init(DisplayState *ds, DisplayOptions *opts)
+{
+    assert(opts->type < DISPLAY_TYPE__MAX);
+    if (opts->type == DISPLAY_TYPE_NONE) {
+        return;
+    }
+    assert(dpys[opts->type] != NULL);
+    dpys[opts->type]->init(ds, opts);
 }
 
 void qemu_chr_parse_vc(QemuOpts *opts, ChardevBackend *backend, Error **errp)

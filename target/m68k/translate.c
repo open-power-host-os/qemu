@@ -32,6 +32,8 @@
 
 #include "trace-tcg.h"
 #include "exec/log.h"
+#include "fpu/softfloat.h"
+
 
 //#define DEBUG_DISPATCH 1
 
@@ -2078,6 +2080,51 @@ DISAS_INSN(movem)
     tcg_temp_free(addr);
 }
 
+DISAS_INSN(movep)
+{
+    uint8_t i;
+    int16_t displ;
+    TCGv reg;
+    TCGv addr;
+    TCGv abuf;
+    TCGv dbuf;
+
+    displ = read_im16(env, s);
+
+    addr = AREG(insn, 0);
+    reg = DREG(insn, 9);
+
+    abuf = tcg_temp_new();
+    tcg_gen_addi_i32(abuf, addr, displ);
+    dbuf = tcg_temp_new();
+
+    if (insn & 0x40) {
+        i = 4;
+    } else {
+        i = 2;
+    }
+
+    if (insn & 0x80) {
+        for ( ; i > 0 ; i--) {
+            tcg_gen_shri_i32(dbuf, reg, (i - 1) * 8);
+            tcg_gen_qemu_st8(dbuf, abuf, IS_USER(s));
+            if (i > 1) {
+                tcg_gen_addi_i32(abuf, abuf, 2);
+            }
+        }
+    } else {
+        for ( ; i > 0 ; i--) {
+            tcg_gen_qemu_ld8u(dbuf, abuf, IS_USER(s));
+            tcg_gen_deposit_i32(reg, reg, dbuf, (i - 1) * 8, 8);
+            if (i > 1) {
+                tcg_gen_addi_i32(abuf, abuf, 2);
+            }
+        }
+    }
+    tcg_temp_free(abuf);
+    tcg_temp_free(dbuf);
+}
+
 DISAS_INSN(bitop_im)
 {
     int opsize;
@@ -2824,6 +2871,7 @@ DISAS_INSN(unlk)
     tcg_gen_mov_i32(reg, tmp);
     tcg_gen_addi_i32(QREG_SP, src, 4);
     tcg_temp_free(src);
+    tcg_temp_free(tmp);
 }
 
 #if defined(CONFIG_SOFTMMU)
@@ -3101,6 +3149,9 @@ DISAS_INSN(subx_mem)
     gen_subx(s, src, dest, opsize);
 
     gen_store(s, opsize, addr_dest, QREG_CC_N, IS_USER(s));
+
+    tcg_temp_free(dest);
+    tcg_temp_free(src);
 }
 
 DISAS_INSN(mov3q)
@@ -3307,6 +3358,9 @@ DISAS_INSN(addx_mem)
     gen_addx(s, src, dest, opsize);
 
     gen_store(s, opsize, addr_dest, QREG_CC_N, IS_USER(s));
+
+    tcg_temp_free(dest);
+    tcg_temp_free(src);
 }
 
 static inline void shift_im(DisasContext *s, uint16_t insn, int opsize)
@@ -4351,6 +4405,8 @@ DISAS_INSN(chk2)
     gen_flush_flags(s);
     gen_helper_chk2(cpu_env, reg, bound1, bound2);
     tcg_temp_free(reg);
+    tcg_temp_free(bound1);
+    tcg_temp_free(bound2);
 }
 
 static void m68k_copy_line(TCGv dst, TCGv src, int index)
@@ -4500,6 +4556,7 @@ DISAS_INSN(moves)
         } else {
             gen_partset_reg(opsize, reg, tmp);
         }
+        tcg_temp_free(tmp);
     }
     switch (extract32(insn, 3, 3)) {
     case 3: /* Indirect postincrement.  */
@@ -5015,6 +5072,12 @@ DISAS_INSN(fpu)
     case 0x5e: /* fdneg */
         gen_helper_fdneg(cpu_env, cpu_dest, cpu_src);
         break;
+    case 0x1e: /* fgetexp */
+        gen_helper_fgetexp(cpu_env, cpu_dest, cpu_src);
+        break;
+    case 0x1f: /* fgetman */
+        gen_helper_fgetman(cpu_env, cpu_dest, cpu_src);
+        break;
     case 0x20: /* fdiv */
         gen_helper_fdiv(cpu_env, cpu_dest, cpu_src, cpu_dest);
         break;
@@ -5023,6 +5086,9 @@ DISAS_INSN(fpu)
         break;
     case 0x64: /* fddiv */
         gen_helper_fddiv(cpu_env, cpu_dest, cpu_src, cpu_dest);
+        break;
+    case 0x21: /* fmod */
+        gen_helper_fmod(cpu_env, cpu_dest, cpu_src, cpu_dest);
         break;
     case 0x22: /* fadd */
         gen_helper_fadd(cpu_env, cpu_dest, cpu_src, cpu_dest);
@@ -5044,6 +5110,12 @@ DISAS_INSN(fpu)
         break;
     case 0x24: /* fsgldiv */
         gen_helper_fsgldiv(cpu_env, cpu_dest, cpu_src, cpu_dest);
+        break;
+    case 0x25: /* frem */
+        gen_helper_frem(cpu_env, cpu_dest, cpu_src, cpu_dest);
+        break;
+    case 0x26: /* fscale */
+        gen_helper_fscale(cpu_env, cpu_dest, cpu_src, cpu_dest);
         break;
     case 0x27: /* fsglmul */
         gen_helper_fsglmul(cpu_env, cpu_dest, cpu_src, cpu_dest);
@@ -5490,6 +5562,7 @@ DISAS_INSN(mac)
         case 4: /* Pre-decrement.  */
             tcg_gen_mov_i32(AREG(insn, 0), addr);
         }
+        tcg_temp_free(loadval);
     }
 }
 
@@ -5678,6 +5751,7 @@ void register_m68k_insns (CPUM68KState *env)
     BASE(bitop_reg, 0140, f1c0);
     BASE(bitop_reg, 0180, f1c0);
     BASE(bitop_reg, 01c0, f1c0);
+    INSN(movep,     0108, f138, MOVEP);
     INSN(arith_im,  0280, fff8, CF_ISA_A);
     INSN(arith_im,  0200, ff00, M68000);
     INSN(undef,     02c0, ffc0, M68000);

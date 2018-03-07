@@ -47,6 +47,7 @@
 #include "exec/address-spaces.h"
 #include "hw/acpi/acpi.h"
 #include "cpu.h"
+#include "qapi/error.h"
 #include "qemu/error-report.h"
 #ifdef CONFIG_XEN
 #include <xen/hvm/hvm_info_table.h>
@@ -292,10 +293,6 @@ static void pc_init1(MachineState *machine,
                                  OBJ_PROP_LINK_UNREF_ON_RELEASE, &error_abort);
         object_property_set_link(OBJECT(machine), OBJECT(piix4_pm),
                                  PC_MACHINE_ACPI_DEVICE_PROP, &error_abort);
-    }
-
-    if (pcmc->pci_enabled) {
-        pc_pci_device_init(pci_bus);
     }
 
     if (pcms->acpi_nvdimm_state.is_enabled) {

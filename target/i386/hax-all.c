@@ -30,7 +30,6 @@
 #include "exec/ioport.h"
 
 #include "qemu-common.h"
-#include "strings.h"
 #include "hax-i386.h"
 #include "sysemu/accel.h"
 #include "sysemu/sysemu.h"
@@ -103,6 +102,8 @@ static int hax_get_capability(struct hax_state *hax)
         fprintf(stderr, "UG mode is not supported by the hardware.\n");
         return -ENOTSUP;
     }
+
+    hax->supports_64bit_ramblock = !!(cap->winfo & HAX_CAP_64BIT_RAMBLOCK);
 
     if (cap->wstatus & HAX_CAP_MEMQUOTA) {
         if (cap->mem_quota < hax->mem_quota) {

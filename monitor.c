@@ -21,9 +21,9 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
 #include <dirent.h>
-#include "qemu-common.h"
 #include "cpu.h"
 #include "hw/hw.h"
 #include "monitor/qdev.h"
@@ -51,8 +51,10 @@
 #include "sysemu/hw_accel.h"
 #include "qemu/acl.h"
 #include "sysemu/tpm.h"
+#include "qapi/qmp/qdict.h"
 #include "qapi/qmp/qerror.h"
-#include "qapi/qmp/types.h"
+#include "qapi/qmp/qnum.h"
+#include "qapi/qmp/qstring.h"
 #include "qapi/qmp/qjson.h"
 #include "qapi/qmp/json-streamer.h"
 #include "qapi/qmp/json-parser.h"
@@ -66,17 +68,18 @@
 #include "exec/memory.h"
 #include "exec/exec-all.h"
 #include "qemu/log.h"
-#include "qmp-commands.h"
+#include "qemu/option.h"
 #include "hmp.h"
 #include "qemu/thread.h"
 #include "block/qapi.h"
+#include "qapi/qapi-commands.h"
+#include "qapi/qapi-events.h"
+#include "qapi/error.h"
 #include "qapi/qmp-event.h"
-#include "qapi-event.h"
-#include "qmp-introspect.h"
+#include "qapi/qapi-introspect.h"
 #include "sysemu/qtest.h"
 #include "sysemu/cpus.h"
 #include "qemu/cutils.h"
-#include "qapi/qmp/dispatch.h"
 
 #if defined(TARGET_S390X)
 #include "hw/s390x/storage-keys.h"
@@ -948,7 +951,7 @@ EventInfoList *qmp_query_events(Error **errp)
  * visit_type_SchemaInfoList() into a SchemaInfoList, then marshal it
  * to QObject with generated output marshallers, every time.  Instead,
  * we do it in test-qobject-input-visitor.c, just to make sure
- * qapi-introspect.py's output actually conforms to the schema.
+ * qapi-gen.py's output actually conforms to the schema.
  */
 static void qmp_query_qmp_schema(QDict *qdict, QObject **ret_data,
                                  Error **errp)
@@ -1052,7 +1055,7 @@ int monitor_set_cpu(int cpu_index)
     return 0;
 }
 
-CPUState *mon_get_cpu(void)
+static CPUState *mon_get_cpu_sync(bool synchronize)
 {
     CPUState *cpu;
 
@@ -1071,8 +1074,15 @@ CPUState *mon_get_cpu(void)
         monitor_set_cpu(first_cpu->cpu_index);
         cpu = first_cpu;
     }
-    cpu_synchronize_state(cpu);
+    if (synchronize) {
+        cpu_synchronize_state(cpu);
+    }
     return cpu;
+}
+
+CPUState *mon_get_cpu(void)
+{
+    return mon_get_cpu_sync(true);
 }
 
 CPUArchState *mon_get_cpu_env(void)
@@ -1084,7 +1094,7 @@ CPUArchState *mon_get_cpu_env(void)
 
 int monitor_get_cpu_index(void)
 {
-    CPUState *cs = mon_get_cpu();
+    CPUState *cs = mon_get_cpu_sync(false);
 
     return cs ? cs->cpu_index : UNASSIGNED_CPU_INDEX;
 }
@@ -3571,67 +3581,6 @@ void migrate_set_parameter_completion(ReadLineState *rs, int nb_args,
     }
 }
 
-void host_net_add_completion(ReadLineState *rs, int nb_args, const char *str)
-{
-    int i;
-    size_t len;
-    if (nb_args != 2) {
-        return;
-    }
-    len = strlen(str);
-    readline_set_completion_index(rs, len);
-    for (i = 0; host_net_devices[i]; i++) {
-        if (!strncmp(host_net_devices[i], str, len)) {
-            readline_add_completion(rs, host_net_devices[i]);
-        }
-    }
-}
-
-void host_net_remove_completion(ReadLineState *rs, int nb_args, const char *str)
-{
-    NetClientState *ncs[MAX_QUEUE_NUM];
-    int count, i, len;
-
-    len = strlen(str);
-    readline_set_completion_index(rs, len);
-    if (nb_args == 2) {
-        count = qemu_find_net_clients_except(NULL, ncs,
-                                             NET_CLIENT_DRIVER_NONE,
-                                             MAX_QUEUE_NUM);
-        for (i = 0; i < MIN(count, MAX_QUEUE_NUM); i++) {
-            int id;
-            char name[16];
-
-            if (net_hub_id_for_client(ncs[i], &id)) {
-                continue;
-            }
-            snprintf(name, sizeof(name), "%d", id);
-            if (!strncmp(str, name, len)) {
-                readline_add_completion(rs, name);
-            }
-        }
-        return;
-    } else if (nb_args == 3) {
-        count = qemu_find_net_clients_except(NULL, ncs,
-                                             NET_CLIENT_DRIVER_NIC,
-                                             MAX_QUEUE_NUM);
-        for (i = 0; i < MIN(count, MAX_QUEUE_NUM); i++) {
-            int id;
-            const char *name;
-
-            if (ncs[i]->info->type == NET_CLIENT_DRIVER_HUBPORT ||
-                net_hub_id_for_client(ncs[i], &id)) {
-                continue;
-            }
-            name = ncs[i]->name;
-            if (!strncmp(str, name, len)) {
-                readline_add_completion(rs, name);
-            }
-        }
-        return;
-    }
-}
-
 static void vm_completion(ReadLineState *rs, const char *str)
 {
     size_t len;
@@ -3693,7 +3642,7 @@ static void monitor_find_completion_by_table(Monitor *mon,
 {
     const char *cmdname;
     int i;
-    const char *ptype, *str, *name;
+    const char *ptype, *old_ptype, *str, *name;
     const mon_cmd_t *cmd;
     BlockBackend *blk = NULL;
 
@@ -3738,7 +3687,9 @@ static void monitor_find_completion_by_table(Monitor *mon,
             }
         }
         str = args[nb_args - 1];
-        while (*ptype == '-' && ptype[1] != '\0') {
+        old_ptype = NULL;
+        while (*ptype == '-' && old_ptype != ptype) {
+            old_ptype = ptype;
             ptype = next_arg_type(ptype);
         }
         switch(*ptype) {
@@ -4139,9 +4090,6 @@ QemuOptsList qemu_mon_opts = {
         },{
             .name = "chardev",
             .type = QEMU_OPT_STRING,
-        },{
-            .name = "default",  /* deprecated */
-            .type = QEMU_OPT_BOOL,
         },{
             .name = "pretty",
             .type = QEMU_OPT_BOOL,

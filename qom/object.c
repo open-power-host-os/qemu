@@ -16,17 +16,17 @@
 #include "qom/object_interfaces.h"
 #include "qemu/cutils.h"
 #include "qapi/visitor.h"
-#include "qapi-visit.h"
 #include "qapi/string-input-visitor.h"
 #include "qapi/string-output-visitor.h"
+#include "qapi/qapi-builtin-visit.h"
 #include "qapi/qmp/qerror.h"
 #include "trace.h"
 
 /* TODO: replace QObject with a simpler visitor to avoid a dependency
  * of the QOM core on QObject?  */
 #include "qom/qom-qobject.h"
-#include "qapi/qmp/qobject.h"
 #include "qapi/qmp/qbool.h"
+#include "qapi/qmp/qnum.h"
 #include "qapi/qmp/qstring.h"
 
 #define MAX_INTERFACES 32
@@ -1035,6 +1035,13 @@ ObjectProperty *object_property_iter_next(ObjectPropertyIterator *iter)
         iter->nextclass = object_class_get_parent(iter->nextclass);
     }
     return val;
+}
+
+void object_class_property_iter_init(ObjectPropertyIterator *iter,
+                                     ObjectClass *klass)
+{
+    g_hash_table_iter_init(&iter->iter, klass->properties);
+    iter->nextclass = klass;
 }
 
 ObjectProperty *object_class_property_find(ObjectClass *klass, const char *name,

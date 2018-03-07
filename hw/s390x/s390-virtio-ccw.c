@@ -12,7 +12,6 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "qemu-common.h"
 #include "cpu.h"
 #include "hw/boards.h"
 #include "exec/address-spaces.h"
@@ -24,6 +23,7 @@
 #include "virtio-ccw.h"
 #include "qemu/config-file.h"
 #include "qemu/error-report.h"
+#include "qemu/option.h"
 #include "s390-pci-bus.h"
 #include "hw/s390x/storage-keys.h"
 #include "hw/s390x/storage-attributes.h"
@@ -33,7 +33,6 @@
 #include "hw/s390x/css-bridge.h"
 #include "migration/register.h"
 #include "cpu_models.h"
-#include "qapi/qmp/qerror.h"
 #include "hw/nmi.h"
 
 S390CPU *s390_cpu_addr2state(uint16_t cpu_addr)
@@ -77,10 +76,6 @@ static void s390_init_cpus(MachineState *machine)
 {
     MachineClass *mc = MACHINE_GET_CLASS(machine);
     int i;
-
-    if (tcg_enabled() && max_cpus > 1) {
-        error_report("WARNING: SMP support on s390x is experimental!");
-    }
 
     /* initialize possible_cpus */
     mc->possible_cpu_arch_ids(machine);
@@ -373,7 +368,7 @@ static void s390_machine_reset(void)
 
     /* all cpus are stopped - configure and start the ipl cpu only */
     s390_ipl_prepare_cpu(ipl_cpu);
-    s390_cpu_set_state(CPU_STATE_OPERATING, ipl_cpu);
+    s390_cpu_set_state(S390_CPU_STATE_OPERATING, ipl_cpu);
 }
 
 static void s390_machine_device_plug(HotplugHandler *hotplug_dev,

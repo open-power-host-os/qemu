@@ -25,6 +25,7 @@
 #include "qemu-common.h"
 #include "migration/vmstate.h"
 #include "exec/exec-all.h"
+#include "fpu/softfloat.h"
 
 
 static void superh_cpu_set_pc(CPUState *cs, vaddr value)
@@ -236,8 +237,8 @@ static void superh_cpu_class_init(ObjectClass *oc, void *data)
     CPUClass *cc = CPU_CLASS(oc);
     SuperHCPUClass *scc = SUPERH_CPU_CLASS(oc);
 
-    scc->parent_realize = dc->realize;
-    dc->realize = superh_cpu_realizefn;
+    device_class_set_parent_realize(dc, superh_cpu_realizefn,
+                                    &scc->parent_realize);
 
     scc->parent_reset = cc->reset;
     cc->reset = superh_cpu_reset;

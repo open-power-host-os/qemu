@@ -21,6 +21,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/pci/pci.h"
@@ -33,13 +34,14 @@
 #include "hw/loader.h"
 #include "qemu/error-report.h"
 #include "qemu/range.h"
-#include "qmp-commands.h"
 #include "trace.h"
 #include "hw/pci/msi.h"
 #include "hw/pci/msix.h"
 #include "exec/address-spaces.h"
 #include "hw/hotplug.h"
 #include "hw/boards.h"
+#include "qapi/error.h"
+#include "qapi/qapi-commands-misc.h"
 #include "qemu/cutils.h"
 
 //#define DEBUG_PCI
@@ -1115,8 +1117,8 @@ void pci_register_bar(PCIDevice *pci_dev, int region_num,
     assert(region_num >= 0);
     assert(region_num < PCI_NUM_REGIONS);
     if (size & (size-1)) {
-        fprintf(stderr, "ERROR: PCI region size must be pow2 "
-                    "type=0x%x, size=0x%"FMT_PCIBUS"\n", type, size);
+        error_report("ERROR: PCI region size must be pow2 "
+                    "type=0x%x, size=0x%"FMT_PCIBUS"", type, size);
         exit(1);
     }
 
@@ -2005,11 +2007,15 @@ static void pci_qdev_realize(DeviceState *qdev, Error **errp)
 {
     PCIDevice *pci_dev = (PCIDevice *)qdev;
     PCIDeviceClass *pc = PCI_DEVICE_GET_CLASS(pci_dev);
+    ObjectClass *klass = OBJECT_CLASS(pc);
     Error *local_err = NULL;
     bool is_default_rom;
 
-    /* initialize cap_present for pci_is_express() and pci_config_size() */
-    if (pc->is_express) {
+    /* initialize cap_present for pci_is_express() and pci_config_size(),
+     * Note that hybrid PCIs are not set automatically and need to manage
+     * QEMU_PCI_CAP_EXPRESS manually */
+    if (object_class_dynamic_cast(klass, INTERFACE_PCIE_DEVICE) &&
+       !object_class_dynamic_cast(klass, INTERFACE_CONVENTIONAL_PCI_DEVICE)) {
         pci_dev->cap_present |= QEMU_PCI_CAP_EXPRESS;
     }
 

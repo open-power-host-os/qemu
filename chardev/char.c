@@ -21,6 +21,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
 #include "qemu/cutils.h"
 #include "monitor/monitor.h"
@@ -28,10 +29,12 @@
 #include "qemu/config-file.h"
 #include "qemu/error-report.h"
 #include "chardev/char.h"
-#include "qmp-commands.h"
-#include "qapi-visit.h"
+#include "qapi/error.h"
+#include "qapi/qapi-commands-char.h"
+#include "qapi/qmp/qerror.h"
 #include "sysemu/replay.h"
 #include "qemu/help_option.h"
+#include "qemu/option.h"
 
 #include "chardev/char-mux.h"
 
