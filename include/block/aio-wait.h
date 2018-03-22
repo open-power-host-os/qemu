@@ -50,8 +50,8 @@
  *   }
  */
 typedef struct {
-    /* Is the main loop waiting for a kick?  Accessed with atomic ops. */
-    bool need_kick;
+    /* Number of waiting AIO_WAIT_WHILE() callers. Accessed with atomic ops. */
+    unsigned num_waiters;
 } AioWait;
 
 /**
@@ -71,35 +71,34 @@ typedef struct {
  * wait on conditions between two IOThreads since that could lead to deadlock,
  * go via the main loop instead.
  */
-#define AIO_WAIT_WHILE(wait, ctx, cond) ({                  \
-    bool waited_ = false;                                   \
-    bool busy_ = true;                                      \
-    AioWait *wait_ = (wait);                                \
-    AioContext *ctx_ = (ctx);                               \
-    if (in_aio_context_home_thread(ctx_)) {                 \
-        while ((cond) || busy_) {                           \
-            busy_ = aio_poll(ctx_, (cond));                 \
-            waited_ |= !!(cond) | busy_;                    \
-        }                                                   \
-    } else {                                                \
-        assert(qemu_get_current_aio_context() ==            \
-               qemu_get_aio_context());                     \
-        assert(!wait_->need_kick);                          \
-        /* Set wait_->need_kick before evaluating cond.  */ \
-        atomic_mb_set(&wait_->need_kick, true);             \
-        while (busy_) {                                     \
-            if ((cond)) {                                   \
-                waited_ = busy_ = true;                     \
-                aio_context_release(ctx_);                  \
-                aio_poll(qemu_get_aio_context(), true);     \
-                aio_context_acquire(ctx_);                  \
-            } else {                                        \
-                busy_ = aio_poll(ctx_, false);              \
-                waited_ |= busy_;                           \
-            }                                               \
-        }                                                   \
-        atomic_set(&wait_->need_kick, false);               \
-    }                                                       \
+#define AIO_WAIT_WHILE(wait, ctx, cond) ({                         \
+    bool waited_ = false;                                          \
+    bool busy_ = true;                                             \
+    AioWait *wait_ = (wait);                                       \
+    AioContext *ctx_ = (ctx);                                      \
+    if (in_aio_context_home_thread(ctx_)) {                        \
+        while ((cond) || busy_) {                                  \
+            busy_ = aio_poll(ctx_, (cond));                        \
+            waited_ |= !!(cond) | busy_;                           \
+        }                                                          \
+    } else {                                                       \
+        assert(qemu_get_current_aio_context() ==                   \
+               qemu_get_aio_context());                            \
+        /* Increment wait_->num_waiters before evaluating cond. */ \
+        atomic_inc(&wait_->num_waiters);                           \
+        while (busy_) {                                            \
+            if ((cond)) {                                          \
+                waited_ = busy_ = true;                            \
+                aio_context_release(ctx_);                         \
+                aio_poll(qemu_get_aio_context(), true);            \
+                aio_context_acquire(ctx_);                         \
+            } else {                                               \
+                busy_ = aio_poll(ctx_, false);                     \
+                waited_ |= busy_;                                  \
+            }                                                      \
+        }                                                          \
+        atomic_dec(&wait_->num_waiters);                           \
+    }                                                              \
     waited_; })
 
 /**
@@ -112,5 +111,18 @@ typedef struct {
  * aio_wait_kick() call will wake up the main thread.
  */
 void aio_wait_kick(AioWait *wait);
+
+/**
+ * aio_wait_bh_oneshot:
+ * @ctx: the aio context
+ * @cb: the BH callback function
+ * @opaque: user data for the BH callback function
+ *
+ * Run a BH in @ctx and wait for it to complete.
+ *
+ * Must be called from the main loop thread with @ctx acquired exactly once.
+ * Note that main loop event processing may occur.
+ */
+void aio_wait_bh_oneshot(AioContext *ctx, QEMUBHFunc *cb, void *opaque);
 
 #endif /* QEMU_AIO_WAIT */

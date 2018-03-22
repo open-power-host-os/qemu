@@ -557,3 +557,99 @@ void HELPER(fscale)(CPUM68KState *env, FPReg *res, FPReg *val0, FPReg *val1)
 {
     res->d = floatx80_scale(val1->d, val0->d, &env->fp_status);
 }
+
+void HELPER(flognp1)(CPUM68KState *env, FPReg *res, FPReg *val)
+{
+    res->d = floatx80_lognp1(val->d, &env->fp_status);
+}
+
+void HELPER(flogn)(CPUM68KState *env, FPReg *res, FPReg *val)
+{
+    res->d = floatx80_logn(val->d, &env->fp_status);
+}
+
+void HELPER(flog10)(CPUM68KState *env, FPReg *res, FPReg *val)
+{
+    res->d = floatx80_log10(val->d, &env->fp_status);
+}
+
+void HELPER(flog2)(CPUM68KState *env, FPReg *res, FPReg *val)
+{
+    res->d = floatx80_log2(val->d, &env->fp_status);
+}
+
+void HELPER(fetox)(CPUM68KState *env, FPReg *res, FPReg *val)
+{
+    res->d = floatx80_etox(val->d, &env->fp_status);
+}
+
+void HELPER(ftwotox)(CPUM68KState *env, FPReg *res, FPReg *val)
+{
+    res->d = floatx80_twotox(val->d, &env->fp_status);
+}
+
+void HELPER(ftentox)(CPUM68KState *env, FPReg *res, FPReg *val)
+{
+    res->d = floatx80_tentox(val->d, &env->fp_status);
+}
+
+void HELPER(ftan)(CPUM68KState *env, FPReg *res, FPReg *val)
+{
+    res->d = floatx80_tan(val->d, &env->fp_status);
+}
+
+void HELPER(fsin)(CPUM68KState *env, FPReg *res, FPReg *val)
+{
+    res->d = floatx80_sin(val->d, &env->fp_status);
+}
+
+void HELPER(fcos)(CPUM68KState *env, FPReg *res, FPReg *val)
+{
+    res->d = floatx80_cos(val->d, &env->fp_status);
+}
+
+void HELPER(fsincos)(CPUM68KState *env, FPReg *res0, FPReg *res1, FPReg *val)
+{
+    floatx80 a = val->d;
+    /* If res0 and res1 specify the same floating-point data register,
+     * the sine result is stored in the register, and the cosine
+     * result is discarded.
+     */
+    res1->d = floatx80_cos(a, &env->fp_status);
+    res0->d = floatx80_sin(a, &env->fp_status);
+}
+
+void HELPER(fatan)(CPUM68KState *env, FPReg *res, FPReg *val)
+{
+    res->d = floatx80_atan(val->d, &env->fp_status);
+}
+
+void HELPER(fasin)(CPUM68KState *env, FPReg *res, FPReg *val)
+{
+    res->d = floatx80_asin(val->d, &env->fp_status);
+}
+
+void HELPER(facos)(CPUM68KState *env, FPReg *res, FPReg *val)
+{
+    res->d = floatx80_acos(val->d, &env->fp_status);
+}
+
+void HELPER(fatanh)(CPUM68KState *env, FPReg *res, FPReg *val)
+{
+    res->d = floatx80_atanh(val->d, &env->fp_status);
+}
+
+void HELPER(ftanh)(CPUM68KState *env, FPReg *res, FPReg *val)
+{
+    res->d = floatx80_tanh(val->d, &env->fp_status);
+}
+
+void HELPER(fsinh)(CPUM68KState *env, FPReg *res, FPReg *val)
+{
+    res->d = floatx80_sinh(val->d, &env->fp_status);
+}
+
+void HELPER(fcosh)(CPUM68KState *env, FPReg *res, FPReg *val)
+{
+    res->d = floatx80_cosh(val->d, &env->fp_status);
+}

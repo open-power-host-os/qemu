@@ -39,7 +39,6 @@ void qdict_put_obj(QDict *qdict, const char *key, QObject *value);
 void qdict_del(QDict *qdict, const char *key);
 int qdict_haskey(const QDict *qdict, const char *key);
 QObject *qdict_get(const QDict *qdict, const char *key);
-QDict *qobject_to_qdict(const QObject *obj);
 bool qdict_is_equal(const QObject *x, const QObject *y);
 void qdict_iter(const QDict *qdict,
                 void (*iter)(const char *key, QObject *obj, void *opaque),
@@ -80,5 +79,11 @@ int qdict_array_entries(QDict *src, const char *subqdict);
 QObject *qdict_crumple(const QDict *src, Error **errp);
 
 void qdict_join(QDict *dest, QDict *src, bool overwrite);
+
+typedef struct QDictRenames {
+    const char *from;
+    const char *to;
+} QDictRenames;
+bool qdict_rename_keys(QDict *qdict, const QDictRenames *renames, Error **errp);
 
 #endif /* QDICT_H */

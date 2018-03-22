@@ -31,6 +31,13 @@
 
 static AioContext *blk_aiocb_get_aio_context(BlockAIOCB *acb);
 
+typedef struct BlockBackendAioNotifier {
+    void (*attached_aio_context)(AioContext *new_context, void *opaque);
+    void (*detach_aio_context)(void *opaque);
+    void *opaque;
+    QLIST_ENTRY(BlockBackendAioNotifier) list;
+} BlockBackendAioNotifier;
+
 struct BlockBackend {
     char *name;
     int refcnt;
@@ -69,6 +76,7 @@ struct BlockBackend {
     bool allow_write_beyond_eof;
 
     NotifierList remove_bs_notifiers, insert_bs_notifiers;
+    QLIST_HEAD(, BlockBackendAioNotifier) aio_notifiers;
 
     int quiesce_counter;
     VMChangeStateEntry *vmsh;
@@ -247,6 +255,36 @@ static int blk_root_inactivate(BdrvChild *child)
     return 0;
 }
 
+static void blk_root_attach(BdrvChild *child)
+{
+    BlockBackend *blk = child->opaque;
+    BlockBackendAioNotifier *notifier;
+
+    trace_blk_root_attach(child, blk, child->bs);
+
+    QLIST_FOREACH(notifier, &blk->aio_notifiers, list) {
+        bdrv_add_aio_context_notifier(child->bs,
+                notifier->attached_aio_context,
+                notifier->detach_aio_context,
+                notifier->opaque);
+    }
+}
+
+static void blk_root_detach(BdrvChild *child)
+{
+    BlockBackend *blk = child->opaque;
+    BlockBackendAioNotifier *notifier;
+
+    trace_blk_root_detach(child, blk, child->bs);
+
+    QLIST_FOREACH(notifier, &blk->aio_notifiers, list) {
+        bdrv_remove_aio_context_notifier(child->bs,
+                notifier->attached_aio_context,
+                notifier->detach_aio_context,
+                notifier->opaque);
+    }
+}
+
 static const BdrvChildRole child_root = {
     .inherit_options    = blk_root_inherit_options,
 
@@ -260,6 +298,9 @@ static const BdrvChildRole child_root = {
 
     .activate           = blk_root_activate,
     .inactivate         = blk_root_inactivate,
+
+    .attach             = blk_root_attach,
+    .detach             = blk_root_detach,
 };
 
 /*
@@ -287,6 +328,7 @@ BlockBackend *blk_new(uint64_t perm, uint64_t shared_perm)
 
     notifier_list_init(&blk->remove_bs_notifiers);
     notifier_list_init(&blk->insert_bs_notifiers);
+    QLIST_INIT(&blk->aio_notifiers);
 
     QTAILQ_INSERT_TAIL(&block_backends, blk, link);
     return blk;
@@ -364,6 +406,7 @@ static void blk_delete(BlockBackend *blk)
     }
     assert(QLIST_EMPTY(&blk->remove_bs_notifiers.notifiers));
     assert(QLIST_EMPTY(&blk->insert_bs_notifiers.notifiers));
+    assert(QLIST_EMPTY(&blk->aio_notifiers));
     QTAILQ_REMOVE(&block_backends, blk, link);
     drive_info_del(blk->legacy_dinfo);
     block_acct_cleanup(&blk->stats);
@@ -1150,7 +1193,7 @@ int coroutine_fn blk_co_pwritev(BlockBackend *blk, int64_t offset,
 typedef struct BlkRwCo {
     BlockBackend *blk;
     int64_t offset;
-    QEMUIOVector *qiov;
+    void *iobuf;
     int ret;
     BdrvRequestFlags flags;
 } BlkRwCo;
@@ -1158,17 +1201,19 @@ typedef struct BlkRwCo {
 static void blk_read_entry(void *opaque)
 {
     BlkRwCo *rwco = opaque;
+    QEMUIOVector *qiov = rwco->iobuf;
 
-    rwco->ret = blk_co_preadv(rwco->blk, rwco->offset, rwco->qiov->size,
-                              rwco->qiov, rwco->flags);
+    rwco->ret = blk_co_preadv(rwco->blk, rwco->offset, qiov->size,
+                              qiov, rwco->flags);
 }
 
 static void blk_write_entry(void *opaque)
 {
     BlkRwCo *rwco = opaque;
+    QEMUIOVector *qiov = rwco->iobuf;
 
-    rwco->ret = blk_co_pwritev(rwco->blk, rwco->offset, rwco->qiov->size,
-                               rwco->qiov, rwco->flags);
+    rwco->ret = blk_co_pwritev(rwco->blk, rwco->offset, qiov->size,
+                               qiov, rwco->flags);
 }
 
 static int blk_prw(BlockBackend *blk, int64_t offset, uint8_t *buf,
@@ -1188,7 +1233,7 @@ static int blk_prw(BlockBackend *blk, int64_t offset, uint8_t *buf,
     rwco = (BlkRwCo) {
         .blk    = blk,
         .offset = offset,
-        .qiov   = &qiov,
+        .iobuf  = &qiov,
         .flags  = flags,
         .ret    = NOT_DONE,
     };
@@ -1296,7 +1341,7 @@ static void blk_aio_complete_bh(void *opaque)
 }
 
 static BlockAIOCB *blk_aio_prwv(BlockBackend *blk, int64_t offset, int bytes,
-                                QEMUIOVector *qiov, CoroutineEntry co_entry,
+                                void *iobuf, CoroutineEntry co_entry,
                                 BdrvRequestFlags flags,
                                 BlockCompletionFunc *cb, void *opaque)
 {
@@ -1308,7 +1353,7 @@ static BlockAIOCB *blk_aio_prwv(BlockBackend *blk, int64_t offset, int bytes,
     acb->rwco = (BlkRwCo) {
         .blk    = blk,
         .offset = offset,
-        .qiov   = qiov,
+        .iobuf  = iobuf,
         .flags  = flags,
         .ret    = NOT_DONE,
     };
@@ -1331,10 +1376,11 @@ static void blk_aio_read_entry(void *opaque)
 {
     BlkAioEmAIOCB *acb = opaque;
     BlkRwCo *rwco = &acb->rwco;
+    QEMUIOVector *qiov = rwco->iobuf;
 
-    assert(rwco->qiov->size == acb->bytes);
+    assert(qiov->size == acb->bytes);
     rwco->ret = blk_co_preadv(rwco->blk, rwco->offset, acb->bytes,
-                              rwco->qiov, rwco->flags);
+                              qiov, rwco->flags);
     blk_aio_complete(acb);
 }
 
@@ -1342,10 +1388,11 @@ static void blk_aio_write_entry(void *opaque)
 {
     BlkAioEmAIOCB *acb = opaque;
     BlkRwCo *rwco = &acb->rwco;
+    QEMUIOVector *qiov = rwco->iobuf;
 
-    assert(!rwco->qiov || rwco->qiov->size == acb->bytes);
+    assert(!qiov || qiov->size == acb->bytes);
     rwco->ret = blk_co_pwritev(rwco->blk, rwco->offset, acb->bytes,
-                               rwco->qiov, rwco->flags);
+                               qiov, rwco->flags);
     blk_aio_complete(acb);
 }
 
@@ -1474,8 +1521,10 @@ int blk_co_ioctl(BlockBackend *blk, unsigned long int req, void *buf)
 static void blk_ioctl_entry(void *opaque)
 {
     BlkRwCo *rwco = opaque;
+    QEMUIOVector *qiov = rwco->iobuf;
+
     rwco->ret = blk_co_ioctl(rwco->blk, rwco->offset,
-                             rwco->qiov->iov[0].iov_base);
+                             qiov->iov[0].iov_base);
 }
 
 int blk_ioctl(BlockBackend *blk, unsigned long int req, void *buf)
@@ -1488,24 +1537,15 @@ static void blk_aio_ioctl_entry(void *opaque)
     BlkAioEmAIOCB *acb = opaque;
     BlkRwCo *rwco = &acb->rwco;
 
-    rwco->ret = blk_co_ioctl(rwco->blk, rwco->offset,
-                             rwco->qiov->iov[0].iov_base);
+    rwco->ret = blk_co_ioctl(rwco->blk, rwco->offset, rwco->iobuf);
+
     blk_aio_complete(acb);
 }
 
 BlockAIOCB *blk_aio_ioctl(BlockBackend *blk, unsigned long int req, void *buf,
                           BlockCompletionFunc *cb, void *opaque)
 {
-    QEMUIOVector qiov;
-    struct iovec iov;
-
-    iov = (struct iovec) {
-        .iov_base = buf,
-        .iov_len = 0,
-    };
-    qemu_iovec_init_external(&qiov, &iov, 1);
-
-    return blk_aio_prwv(blk, req, 0, &qiov, blk_aio_ioctl_entry, 0, cb, opaque);
+    return blk_aio_prwv(blk, req, 0, buf, blk_aio_ioctl_entry, 0, cb, opaque);
 }
 
 int blk_co_pdiscard(BlockBackend *blk, int64_t offset, int bytes)
@@ -1860,7 +1900,14 @@ void blk_add_aio_context_notifier(BlockBackend *blk,
         void (*attached_aio_context)(AioContext *new_context, void *opaque),
         void (*detach_aio_context)(void *opaque), void *opaque)
 {
+    BlockBackendAioNotifier *notifier;
     BlockDriverState *bs = blk_bs(blk);
+
+    notifier = g_new(BlockBackendAioNotifier, 1);
+    notifier->attached_aio_context = attached_aio_context;
+    notifier->detach_aio_context = detach_aio_context;
+    notifier->opaque = opaque;
+    QLIST_INSERT_HEAD(&blk->aio_notifiers, notifier, list);
 
     if (bs) {
         bdrv_add_aio_context_notifier(bs, attached_aio_context,
@@ -1874,12 +1921,25 @@ void blk_remove_aio_context_notifier(BlockBackend *blk,
                                      void (*detach_aio_context)(void *),
                                      void *opaque)
 {
+    BlockBackendAioNotifier *notifier;
     BlockDriverState *bs = blk_bs(blk);
 
     if (bs) {
         bdrv_remove_aio_context_notifier(bs, attached_aio_context,
                                          detach_aio_context, opaque);
     }
+
+    QLIST_FOREACH(notifier, &blk->aio_notifiers, list) {
+        if (notifier->attached_aio_context == attached_aio_context &&
+            notifier->detach_aio_context == detach_aio_context &&
+            notifier->opaque == opaque) {
+            QLIST_REMOVE(notifier, list);
+            g_free(notifier);
+            return;
+        }
+    }
+
+    abort();
 }
 
 void blk_add_remove_bs_notifier(BlockBackend *blk, Notifier *notify)
@@ -1949,7 +2009,9 @@ int blk_truncate(BlockBackend *blk, int64_t offset, PreallocMode prealloc,
 static void blk_pdiscard_entry(void *opaque)
 {
     BlkRwCo *rwco = opaque;
-    rwco->ret = blk_co_pdiscard(rwco->blk, rwco->offset, rwco->qiov->size);
+    QEMUIOVector *qiov = rwco->iobuf;
+
+    rwco->ret = blk_co_pdiscard(rwco->blk, rwco->offset, qiov->size);
 }
 
 int blk_pdiscard(BlockBackend *blk, int64_t offset, int bytes)

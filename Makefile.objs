@@ -104,6 +104,7 @@ common-obj-$(CONFIG_LINUX) += fsdev/
 common-obj-y += migration/
 
 common-obj-y += audio/
+common-obj-m += audio/
 common-obj-y += hw/
 
 common-obj-y += replay/
@@ -233,6 +234,7 @@ trace-events-subdirs += hw/alpha
 trace-events-subdirs += hw/hppa
 trace-events-subdirs += hw/xen
 trace-events-subdirs += hw/ide
+trace-events-subdirs += hw/tpm
 trace-events-subdirs += ui
 trace-events-subdirs += audio
 trace-events-subdirs += net
