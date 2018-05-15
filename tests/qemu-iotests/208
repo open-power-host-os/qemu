@@ -22,13 +22,15 @@
 
 import iotests
 
+iotests.verify_image_format(supported_fmts=['generic'])
+
 with iotests.FilePath('disk.img') as disk_img_path, \
      iotests.FilePath('disk-snapshot.img') as disk_snapshot_img_path, \
      iotests.FilePath('nbd.sock') as nbd_sock_path, \
      iotests.VM() as vm:
 
     img_size = '10M'
-    iotests.qemu_img_pipe('create', '-f', iotests.imgfmt, disk_img_path, img_size)
+    iotests.qemu_img_create('-f', iotests.imgfmt, disk_img_path, img_size)
 
     iotests.log('Launching VM...')
     (vm.add_drive(disk_img_path, 'node-name=drive0-node', interface='none')

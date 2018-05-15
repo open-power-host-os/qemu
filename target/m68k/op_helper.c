@@ -287,22 +287,25 @@ static inline void do_stack_frame(CPUM68KState *env, uint32_t *sp,
                                   uint16_t format, uint16_t sr,
                                   uint32_t addr, uint32_t retaddr)
 {
-    CPUState *cs = CPU(m68k_env_get_cpu(env));
-    switch (format) {
-    case 4:
-        *sp -= 4;
-        cpu_stl_kernel(env, *sp, env->pc);
-        *sp -= 4;
-        cpu_stl_kernel(env, *sp, addr);
-        break;
-    case 3:
-    case 2:
-        *sp -= 4;
-        cpu_stl_kernel(env, *sp, addr);
-        break;
+    if (m68k_feature(env, M68K_FEATURE_QUAD_MULDIV)) {
+        /*  all except 68000 */
+        CPUState *cs = CPU(m68k_env_get_cpu(env));
+        switch (format) {
+        case 4:
+            *sp -= 4;
+            cpu_stl_kernel(env, *sp, env->pc);
+            *sp -= 4;
+            cpu_stl_kernel(env, *sp, addr);
+            break;
+        case 3:
+        case 2:
+            *sp -= 4;
+            cpu_stl_kernel(env, *sp, addr);
+            break;
+        }
+        *sp -= 2;
+        cpu_stw_kernel(env, *sp, (format << 12) + (cs->exception_index << 2));
     }
-    *sp -= 2;
-    cpu_stw_kernel(env, *sp, (format << 12) + (cs->exception_index << 2));
     *sp -= 4;
     cpu_stl_kernel(env, *sp, retaddr);
     *sp -= 2;
@@ -1056,7 +1059,7 @@ void HELPER(chk)(CPUM68KState *env, int32_t val, int32_t ub)
         CPUState *cs = CPU(m68k_env_get_cpu(env));
 
         /* Recover PC and CC_OP for the beginning of the insn.  */
-        cpu_restore_state(cs, GETPC());
+        cpu_restore_state(cs, GETPC(), true);
 
         /* flags have been modified by gen_flush_flags() */
         env->cc_op = CC_OP_FLAGS;
@@ -1087,7 +1090,7 @@ void HELPER(chk2)(CPUM68KState *env, int32_t val, int32_t lb, int32_t ub)
         CPUState *cs = CPU(m68k_env_get_cpu(env));
 
         /* Recover PC and CC_OP for the beginning of the insn.  */
-        cpu_restore_state(cs, GETPC());
+        cpu_restore_state(cs, GETPC(), true);
 
         /* flags have been modified by gen_flush_flags() */
         env->cc_op = CC_OP_FLAGS;
